@@ -59,7 +59,7 @@ pub(crate) trait TlsHandshakeInfo: TlsHandshakeStream {
 
 /// Dispatching wrapper for optionally supporting TLS
 #[derive(Debug)]
-#[pin_project(project=BraidProjection)]
+#[pin_project(project=OptTlsProjection)]
 pub enum OptTlsStream<Tls, NoTls> {
     /// A stream without TLS
     NoTls(#[pin] NoTls),
@@ -98,8 +98,8 @@ macro_rules! dispatch {
     ($driver:ident.$method:ident($($args:expr),+)) => {
 
         match $driver.project() {
-            BraidProjection::NoTls(stream) => stream.$method($($args),+),
-            BraidProjection::Tls(stream) => stream.$method($($args),+),
+            OptTlsProjection::NoTls(stream) => stream.$method($($args),+),
+            OptTlsProjection::Tls(stream) => stream.$method($($args),+),
         }
     };
 }
