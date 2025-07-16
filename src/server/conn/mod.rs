@@ -4,11 +4,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use pin_project::pin_project;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tower::BoxError;
-
-use crate::info::HasConnectionInfo;
-
 pub(super) mod drivers;
 
 #[cfg(feature = "tls")]
@@ -44,7 +40,7 @@ pub trait Connection {
 /// An async generator of new connections
 pub trait Accept {
     /// The connection type for this acceptor
-    type Connection: AsyncRead + AsyncWrite + Unpin + 'static;
+    type Connection: Unpin + 'static;
 
     /// The error type for this acceptor
     type Error: Into<BoxError>;
@@ -96,8 +92,6 @@ impl<A> AcceptOne<A> {
 impl<A> Future for AcceptOne<A>
 where
     A: Accept,
-    A::Connection: HasConnectionInfo,
-    <<A as Accept>::Connection as HasConnectionInfo>::Addr: Clone + Unpin + Send + Sync + 'static,
 {
     type Output = Result<A::Connection, A::Error>;
 

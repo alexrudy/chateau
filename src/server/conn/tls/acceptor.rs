@@ -7,6 +7,7 @@ use std::sync::Arc;
 use futures_core::ready;
 use pin_project::pin_project;
 use rustls::ServerConfig;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::info::HasConnectionInfo;
 
@@ -37,7 +38,7 @@ impl<A> TlsAcceptor<A> {
 impl<A> Accept for TlsAcceptor<A>
 where
     A: Accept,
-    A::Connection: HasConnectionInfo,
+    A::Connection: AsyncRead + AsyncWrite + HasConnectionInfo,
     <A::Connection as HasConnectionInfo>::Addr: Clone + Unpin + Send + Sync + 'static,
 {
     type Connection = TlsStream<A::Connection>;

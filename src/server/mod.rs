@@ -10,7 +10,7 @@ use tracing::debug;
 use tracing::instrument::Instrumented;
 
 use crate::BoxError;
-use crate::{info::HasConnectionInfo, notify, services::MakeServiceRef};
+use crate::{notify, services::MakeServiceRef};
 
 use self::conn::drivers::{ConnectionDriver, ServerExecutor};
 use self::conn::drivers::{GracefulConnectionDriver, GracefulServerExecutor};
@@ -107,7 +107,6 @@ impl<A, P, S, R, E> Server<A, P, S, R, E> {
         S: MakeServiceRef<A::Connection, R>,
         P: Protocol<S::Service, A::Connection, R>,
         A: Accept + Unpin,
-        A::Connection: HasConnectionInfo,
         F: Future<Output = ()> + Send + 'static,
         E: ServerExecutor<P, S, A, R>,
     {
