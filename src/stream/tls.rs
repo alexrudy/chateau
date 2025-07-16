@@ -53,7 +53,6 @@ pub trait TlsHandshakeStream {
 }
 
 /// A stream which can provide information about the TLS handshake.
-#[cfg(feature = "server")]
 pub(crate) trait TlsHandshakeInfo: TlsHandshakeStream {
     fn recv(&self) -> TlsConnectionInfoReceiver;
 }
@@ -82,7 +81,6 @@ where
     }
 }
 
-#[cfg(feature = "server")]
 impl<Tls, NoTls> TlsHandshakeInfo for OptTlsStream<Tls, NoTls>
 where
     Tls: TlsHandshakeInfo + Unpin,

@@ -8,7 +8,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 pin-project = { version = "1" }
 rustls-native-certs = { version = "0.8.1", optional = true }
-thiserror = { version = "2", optional = true }
+thiserror = { version = "2" }
 tokio = { version = "1", features = ["full"] }
 tracing = { version = "^0.1" }
 
@@ -48,7 +48,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 [features]
 default = []
 docs = []
-server = ["dep:thiserror"]
 tls = ["dep:rustls-native-certs", "dep:rustls", "dep:tokio-rustls"]
 tls-aws-lc = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
 tls-ring = ["rustls/ring", "tokio-rustls/ring"]
