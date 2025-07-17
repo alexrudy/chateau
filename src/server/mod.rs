@@ -12,10 +12,12 @@ use tracing::instrument::Instrumented;
 use crate::BoxError;
 use crate::{notify, services::MakeServiceRef};
 
+pub use self::builder::{NeedsAcceptor, NeedsExecutor, NeedsProtocol, NeedsService};
 use self::conn::drivers::{ConnectionDriver, ServerExecutor};
 use self::conn::drivers::{GracefulConnectionDriver, GracefulServerExecutor};
 pub use self::conn::{Accept, Connection, Protocol};
 
+mod builder;
 pub mod conn;
 
 /// A server that can accept connections, and run each connection
@@ -51,6 +53,19 @@ pub struct Server<A, P, S, R, E> {
 impl<A, P, S, R, E> fmt::Debug for Server<A, P, S, R, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Server").finish()
+    }
+}
+
+impl Server<(), (), (), (), ()> {
+    /// Create a new server builder.
+    pub fn builder<R>() -> Server<NeedsAcceptor, NeedsProtocol, NeedsService, R, NeedsExecutor> {
+        Server {
+            acceptor: Default::default(),
+            protocol: Default::default(),
+            make_service: Default::default(),
+            executor: Default::default(),
+            request: Default::default(),
+        }
     }
 }
 
