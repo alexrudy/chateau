@@ -21,8 +21,13 @@ pub use tokio::net::TcpListener;
 use crate::info::HasConnectionInfo;
 use crate::server::Accept;
 
-/// Canonicalize a socket address, converting IPv4 addresses which are
-/// mapped into IPv6 addresses into standard IPv4 addresses.
+/// Canonicalize a socket address, converting IPv4-mapped IPv6 addresses
+/// into standard IPv4 addresses.
+///
+/// This function handles the common case where IPv4 clients connecting to
+/// dual-stack (IPv4/IPv6) servers appear as IPv4-mapped IPv6 addresses
+/// (e.g., `::ffff:192.0.2.1`) and converts them back to regular IPv4
+/// addresses (`192.0.2.1`).
 pub(crate) fn make_canonical(addr: std::net::SocketAddr) -> std::net::SocketAddr {
     match addr.ip() {
         std::net::IpAddr::V4(_) => addr,
@@ -58,8 +63,18 @@ impl TcpStream {
     /// Note: Ensure that the TcpStream is set up correctly for your use case - for example, if you
     /// want keep-alive support you may need to set the `TCP_KEEPALIVE` socket option.
     ///
-    /// If you want an easier wrapper, use `TcpStream::connect` instead, or use `TcpStream::connect_with_configuration`
-    /// to explicitly set a configuration the way the TCP transport does in the client implementation.
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use chateau::stream::tcp::TcpStream;
+    /// use tokio::net::TcpStream as TokioTcpStream;
+    ///
+    /// # async fn example() -> std::io::Result<()> {
+    /// let tokio_stream = TokioTcpStream::connect("127.0.0.1:8080").await?;
+    /// let stream = TcpStream::client(tokio_stream);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn client(inner: tokio::net::TcpStream) -> Self {
         Self {
             stream: inner,
@@ -70,6 +85,27 @@ impl TcpStream {
     /// Create a new `TcpStream` from an existing `tokio::net::TcpStream` for a server
     /// connection. Server connections should have a valid `local_addr` but may not have a
     /// `peer_addr`, hence the remote address must be provided.
+    ///
+    /// This is particularly useful when accepting connections on a server, as it preserves
+    /// the remote address information that might be lost later.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use chateau::stream::tcp::TcpStream;
+    /// use tokio::net::TcpListener;
+    ///
+    /// # async fn example() -> std::io::Result<()> {
+    /// let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    /// let (tokio_stream, remote_addr) = listener.accept().await?;
+    /// let stream = TcpStream::server(tokio_stream, remote_addr);
+    /// 
+    /// // Remote address is always available, even if the underlying
+    /// // socket loses this information
+    /// let peer = stream.peer_addr()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn server(inner: tokio::net::TcpStream, remote: SocketAddr) -> Self {
         Self {
             stream: inner,

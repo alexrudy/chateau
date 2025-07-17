@@ -1,5 +1,9 @@
-//! Support for braided streams which include Transport Layer security
-//! and so involve a negotiation component.
+//! TLS (Transport Layer Security) stream support and handshake management.
+//!
+//! This module provides abstractions for working with TLS-enabled streams that require
+//! a handshake negotiation phase. It includes support for both mandatory and optional
+//! TLS configurations, allowing streams to gracefully handle both encrypted and
+//! unencrypted connections.
 
 use std::io;
 use std::pin::Pin;
@@ -38,15 +42,35 @@ where
 }
 
 /// A stream that supports a TLS handshake.
+///
+/// This trait provides the core functionality for managing TLS handshakes
+/// on streams. Implementations should handle the TLS negotiation protocol
+/// and provide polling-based handshake completion.
 pub trait TlsHandshakeStream {
     /// Poll the handshake to completion.
+    ///
+    /// This method should be called repeatedly until it returns `Poll::Ready(Ok(()))`
+    /// indicating the handshake is complete, or `Poll::Ready(Err(_))` if the handshake failed.
+    /// Returns `Poll::Pending` if the handshake is still in progress.
     fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>>;
 
     /// Finish the TLS handshake.
     ///
-    /// This method will drive the connection asynchronosly allowing you to wait
+    /// This method will drive the connection asynchronously, allowing you to wait
     /// for the TLS handshake to complete. If this method is not called, the TLS handshake
-    /// will be completed the first time the connection is used.
+    /// will be completed the first time the connection is used for I/O operations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use chateau::stream::tls::TlsHandshakeStream;
+    ///
+    /// # async fn example<T: TlsHandshakeStream>(mut stream: T) -> std::io::Result<()> {
+    /// // Explicitly complete the handshake before doing any I/O
+    /// stream.finish_handshake().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     fn finish_handshake(&mut self) -> Handshaking<'_, Self> {
         Handshaking::new(self)
     }
@@ -57,7 +81,14 @@ pub(crate) trait TlsHandshakeInfo: TlsHandshakeStream {
     fn recv(&self) -> TlsConnectionInfoReceiver;
 }
 
-/// Dispatching wrapper for optionally supporting TLS
+/// Dispatching wrapper for optionally supporting TLS.
+///
+/// This enum allows code to work with streams that may or may not use TLS,
+/// providing a unified interface for both cases. The `Tls` variant contains
+/// a TLS-enabled stream, while `NoTls` contains a plain stream.
+///
+/// All async I/O operations are automatically dispatched to the appropriate
+/// underlying stream type.
 #[derive(Debug)]
 #[pin_project(project=OptTlsProjection)]
 pub enum OptTlsStream<Tls, NoTls> {
@@ -149,42 +180,5 @@ where
 impl<Tls, NoTls> From<NoTls> for OptTlsStream<Tls, NoTls> {
     fn from(stream: NoTls) -> Self {
         Self::NoTls(stream)
-    }
-}
-
-/// Extension trait for `TlsHandshakeStream`.
-pub trait TlsHandshakeExt: TlsHandshakeStream {
-    /// Perform a TLS handshake.
-    fn handshake(&mut self) -> TlsHandshakeFuture<'_, Self>
-    where
-        Self: Sized,
-    {
-        TlsHandshakeFuture::new(self)
-    }
-}
-
-impl<T> TlsHandshakeExt for T where T: TlsHandshakeStream {}
-
-/// A future that resolves once the TLS handshake is complete.
-#[derive(Debug)]
-#[pin_project]
-pub struct TlsHandshakeFuture<'s, S> {
-    stream: &'s mut S,
-}
-
-impl<'s, S> TlsHandshakeFuture<'s, S> {
-    fn new(stream: &'s mut S) -> Self {
-        Self { stream }
-    }
-}
-
-impl<S> Future for TlsHandshakeFuture<'_, S>
-where
-    S: TlsHandshakeStream,
-{
-    type Output = Result<(), io::Error>;
-
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project().stream.poll_handshake(cx)
     }
 }
