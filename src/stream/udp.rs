@@ -168,6 +168,17 @@ impl UdpListener {
                     let mut buf = tokio::io::ReadBuf::uninit(this.recv_buffer.spare_capacity_mut());
                     match this.socket.poll_recv_from(cx, &mut buf) {
                         Poll::Ready(Ok(addr)) => {
+                            let n = buf.filled().len();
+                            trace!("UDP: Received datagram n={}", n);
+
+                            // SAFETY: We _just_ read n bytes into buf, which is just
+                            // an exclusive reference into this.recv_buffer, so we know
+                            // that we can set the length here.
+                            #[allow(unsafe_code)]
+                            unsafe {
+                                this.recv_buffer.set_len(n);
+                            }
+
                             let data = this.recv_buffer.split().freeze();
                             let message = UdpMessage::new(data, addr);
                             let connection = UdpConnection {
@@ -182,6 +193,7 @@ impl UdpListener {
                                     ListenerState::Permit(Box::pin(sender.reserve_owned()));
                                 return Poll::Ready(Ok(Some(connection)));
                             } else {
+                                trace!("Dropping datagram: UDP sender closed");
                                 return Poll::Ready(Ok(None));
                             }
                         }
@@ -212,7 +224,10 @@ impl UdpListener {
             match this.send_state {
                 SenderState::Polling => {
                     match this.outbound.poll_recv(cx) {
-                        Poll::Ready(Some(msg)) => *this.send_state = SenderState::Send(msg),
+                        Poll::Ready(Some(msg)) => {
+                            trace!("Outgoing UDP datagram: {}", msg.bytes().len());
+                            *this.send_state = SenderState::Send(msg)
+                        }
                         Poll::Ready(None) => {
                             // Stream has closed, return an error so we don't accept anything else.
                             return Poll::Ready(io::Error::new(
