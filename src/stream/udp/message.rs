@@ -30,10 +30,12 @@ impl UdpMessage {
         &self.data
     }
 
+    /// Returns the length of the data in the message.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Returns true if the message is empty.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -44,7 +46,7 @@ impl UdpMessage {
     }
 
     /// Advance the internal send cursor.
-    pub(crate) fn advance(&mut self, sent: usize) -> bool {
+    pub fn advance(&mut self, sent: usize) -> bool {
         self.cursor += sent;
         self.cursor >= self.data.len()
     }
@@ -70,27 +72,5 @@ impl From<(Box<[u8]>, SocketAddr)> for UdpMessage {
 impl From<(Bytes, SocketAddr)> for UdpMessage {
     fn from((data, addr): (Bytes, SocketAddr)) -> Self {
         UdpMessage::new(data, addr)
-    }
-}
-
-pub struct UdpMessageCursor {
-    message: Bytes,
-    cursor: usize,
-}
-
-impl UdpMessageCursor {
-    pub fn new(message: Bytes) -> Self {
-        Self { message, cursor: 0 }
-    }
-
-    /// Advance the internal send cursor.
-    pub fn advance(&mut self, sent: usize) -> bool {
-        self.cursor += sent;
-        self.cursor >= self.message.len()
-    }
-
-    /// Get the unsent slice of this message.
-    pub fn slice(&self) -> &[u8] {
-        &self.message[self.cursor..]
     }
 }
