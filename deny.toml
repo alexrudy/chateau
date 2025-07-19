@@ -5,11 +5,19 @@
 yanked = "warn"
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Zlib",
+    "ISC",
+    "BSD-3-Clause",
+    "OpenSSL",
+]
 
 [bans]
 multiple-versions = "warn"
-skip-tree = ["windows-sys"]
+skip-tree = ["windows-sys", "aws-lc-sys"]
 
 [sources]
 unknown-registry = "warn"
