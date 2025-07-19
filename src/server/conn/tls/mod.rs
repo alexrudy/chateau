@@ -2,11 +2,10 @@
 //! which additionally provides connection information after the
 //! handshake has been completed.
 
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::{fmt, io};
 use std::{future::Future, pin::Pin};
 
-use futures_core::ready;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::Accept;
 
