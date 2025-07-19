@@ -8,6 +8,10 @@ pub mod tls;
 pub use self::tls::HasTlsConnectionInfo;
 #[cfg(feature = "tls")]
 pub use self::tls::TlsConnectionInfo;
+#[doc(hidden)]
+pub use crate::stream::duplex::DuplexAddr;
+#[doc(hidden)]
+pub use crate::stream::unix::UnixAddr;
 
 /// Information about a connection to a stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +32,13 @@ where
             local_addr: Addr::default(),
             remote_addr: Addr::default(),
         }
+    }
+}
+
+impl ConnectionInfo<DuplexAddr> {
+    /// Connection info for a duplex stream.
+    pub fn duplex() -> Self {
+        Self::default()
     }
 }
 

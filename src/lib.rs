@@ -2,6 +2,8 @@
 
 use std::{fmt, pin::Pin};
 
+pub mod client;
+pub(crate) mod happy_eyeballs;
 pub mod info;
 mod notify;
 pub mod rt;
@@ -41,7 +43,7 @@ pub(crate) mod private {
     pub trait Sealed<T> {}
 }
 
-/// Test fixtures for the `hyperdriver` crate.
+/// Test fixtures
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) mod fixtures {
