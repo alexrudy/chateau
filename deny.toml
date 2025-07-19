@@ -1,0 +1,16 @@
+# Configuration for cargo-deny
+# See: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+yanked = "warn"
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+
+[bans]
+multiple-versions = "warn"
+skip-tree = ["windows-sys"]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
