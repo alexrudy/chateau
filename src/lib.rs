@@ -48,6 +48,7 @@ pub(crate) mod fixtures {
 
     use std::sync::Once;
 
+    #[cfg(feature = "tls")]
     use rustls::ServerConfig;
 
     /// Registers a global default tracing subscriber when called for the first time. This is intended

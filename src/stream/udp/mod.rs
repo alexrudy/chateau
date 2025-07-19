@@ -103,12 +103,12 @@ impl Accept for UdpListener {
                     addr,
                     socket: socket.clone(),
                 };
-                return Poll::Ready(Ok(connection));
+                Poll::Ready(Ok(connection))
             }
             Poll::Ready(Err(error)) => {
-                return Poll::Ready(Err(error));
+                Poll::Ready(Err(error))
             }
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => Poll::Pending,
         }
     }
 }
