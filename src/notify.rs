@@ -179,8 +179,8 @@ mod tests {
         let (sender, receiver) = channel();
 
         // Test that Debug is implemented
-        let _sender_debug = format!("{:?}", sender);
-        let _receiver_debug = format!("{:?}", receiver);
+        let _sender_debug = format!("{sender:?}");
+        let _receiver_debug = format!("{receiver:?}");
 
         // Should not panic
     }
