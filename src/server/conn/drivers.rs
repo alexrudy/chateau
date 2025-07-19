@@ -4,7 +4,6 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures_util::future::{Fuse, FutureExt as _};
 use pin_project::pin_project;
 use tracing::Span;
 use tracing::debug;
@@ -141,7 +140,7 @@ pub struct GracefulConnectionDriver<C, E> {
     #[pin]
     conn: ConnectionDriver<C, E>,
     #[pin]
-    shutdown: Fuse<notify::Notified>,
+    shutdown: notify::Notified,
     finished: notify::Sender,
     span: Span,
 }
@@ -161,7 +160,7 @@ impl<C, E> GracefulConnectionDriver<C, E> {
     ) -> Self {
         Self {
             conn: ConnectionDriver::new(conn),
-            shutdown: shutdown.into_future().fuse(),
+            shutdown: shutdown.into_future(),
             finished,
             span,
         }
