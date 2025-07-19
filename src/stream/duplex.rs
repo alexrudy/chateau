@@ -1,6 +1,5 @@
-//! A duplex stream suitable for a transport mechanism.
-
 #![cfg(feature = "duplex")]
+//! A duplex stream suitable for a transport mechanism.
 //!
 //! This isn't just a plain-old stream, becasue we need to support
 //! multiple connect/accept pairs to fully support the server.
@@ -38,6 +37,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::info::{self, HasConnectionInfo};
 
+#[cfg(feature = "server")]
 use crate::server::conn::Accept;
 
 /// Address (blank) for a duplex stream
@@ -221,6 +221,7 @@ impl DuplexIncoming {
     }
 }
 
+#[cfg(feature = "server")]
 impl Accept for DuplexIncoming {
     type Connection = DuplexStream;
     type Error = io::Error;

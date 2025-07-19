@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio::net::TcpListener;
 
 use crate::info::HasConnectionInfo;
+#[cfg(feature = "server")]
 use crate::server::Accept;
 
 /// Canonicalize a socket address, converting IPv4-mapped IPv6 addresses
@@ -218,6 +219,7 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+#[cfg(feature = "server")]
 impl Accept for TcpListener {
     type Connection = TcpStream;
     type Error = io::Error;

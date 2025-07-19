@@ -20,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio::net::UnixListener;
 
 use crate::info::HasConnectionInfo;
+#[cfg(feature = "server")]
 use crate::server::Accept;
 
 /// Connection address for a unix domain socket.
@@ -216,6 +217,7 @@ impl AsyncWrite for UnixStream {
     }
 }
 
+#[cfg(feature = "server")]
 impl Accept for UnixListener {
     type Connection = UnixStream;
     type Error = io::Error;

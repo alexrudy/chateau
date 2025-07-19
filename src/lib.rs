@@ -5,11 +5,21 @@ use std::{fmt, pin::Pin};
 pub mod client;
 pub(crate) mod happy_eyeballs;
 pub mod info;
+#[cfg(feature = "server")]
 mod notify;
 pub mod rt;
+#[cfg(feature = "server")]
 pub mod server;
 pub mod services;
 pub mod stream;
+
+#[cfg(all(
+    feature = "tls",
+    not(any(feature = "tls-ring", feature = "tls-aws-lc"))
+))]
+compile_error!(
+    "The 'tls' feature requires a backend, enable 'tls-ring' or 'tls-aws-lc' to select a backend"
+);
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

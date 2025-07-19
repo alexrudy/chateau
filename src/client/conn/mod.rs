@@ -46,5 +46,7 @@ pub mod transport;
 pub use self::connection::Connection;
 pub use self::connector::Connector;
 pub use self::protocol::Protocol;
+#[cfg(feature = "tls")]
+pub use self::transport::TlsTransport;
 pub use self::transport::Transport;
-pub use self::transport::{TlsTransport, TransportExt as _};
+pub use self::transport::TransportExt;
