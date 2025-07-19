@@ -7,7 +7,7 @@
 //! # Modules
 //!
 //! - [`tcp`] - TCP stream wrapper with improved address semantics for servers
-//! - [`tls`] - TLS handshake support and optional TLS stream dispatching 
+//! - [`tls`] - TLS handshake support and optional TLS stream dispatching
 //! - [`udp`] - UDP message-based abstractions compatible with tower services
 //!
 //! # Examples
@@ -21,7 +21,7 @@
 //! let listener = TcpListener::bind("127.0.0.1:8080").await?;
 //! let (stream, addr) = listener.accept().await?;
 //! let tcp_stream = TcpStream::server(stream, addr);
-//! 
+//!
 //! // Server streams retain the remote address even when
 //! // the underlying socket can't provide it
 //! let remote = tcp_stream.peer_addr()?;
@@ -33,11 +33,11 @@
 //! ```rust,no_run
 //! use chateau::stream::udp::{UdpListener, UdpMessage};
 //! use tokio::net::UdpSocket;
-//! 
+//!
 //! # async fn example() -> std::io::Result<()> {
 //! let socket = UdpSocket::bind("127.0.0.1:8080").await?;
 //! let listener = UdpListener::new(socket, 1024, 16);
-//! 
+//!
 //! // UDP listener provides connection-like semantics
 //! // for message-based protocol
 //! # Ok(())

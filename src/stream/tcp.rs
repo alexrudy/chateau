@@ -99,7 +99,7 @@ impl TcpStream {
     /// let listener = TcpListener::bind("127.0.0.1:8080").await?;
     /// let (tokio_stream, remote_addr) = listener.accept().await?;
     /// let stream = TcpStream::server(tokio_stream, remote_addr);
-    /// 
+    ///
     /// // Remote address is always available, even if the underlying
     /// // socket loses this information
     /// let peer = stream.peer_addr()?;

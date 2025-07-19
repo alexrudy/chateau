@@ -105,9 +105,7 @@ impl Accept for UdpListener {
                 };
                 Poll::Ready(Ok(connection))
             }
-            Poll::Ready(Err(error)) => {
-                Poll::Ready(Err(error))
-            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Pending => Poll::Pending,
         }
     }
