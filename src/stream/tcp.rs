@@ -57,6 +57,15 @@ impl fmt::Debug for TcpStream {
 }
 
 impl TcpStream {
+    /// Connect to an address as a client stream
+    pub async fn connect(addr: SocketAddr) -> std::io::Result<Self> {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        Ok(Self {
+            stream,
+            remote: Some(addr),
+        })
+    }
+
     /// Create a new `TcpStream` from an existing `tokio::net::TcpStream` for a client
     /// connection. Client connections should have valid `peer_addr` and `local_addr`.
     ///
