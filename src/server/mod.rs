@@ -85,38 +85,6 @@ impl<A, P, S, R, E> Server<A, P, S, R, E> {
     }
 
     /// Shutdown the server gracefully when the given future resolves.
-    ///
-    ///
-    /// # Example
-    /// ```rust
-    /// use hyperdriver::stream::duplex;
-    /// use hyperdriver::Server;
-    /// use hyperdriver::Body;
-    /// use tower::service_fn;
-    ///
-    /// # #[derive(Debug)]
-    /// # struct MyError;
-    /// #
-    /// # impl std::fmt::Display for MyError {
-    /// #   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    /// #        f.write_str("MyError")
-    /// #  }
-    /// # }
-    /// #
-    /// # impl std::error::Error for MyError {}
-    /// #
-    /// # async fn example() {
-    /// let (_, incoming) = duplex::pair();
-    /// let server = Server::builder()
-    ///     .with_acceptor(incoming)
-    ///     .with_shared_service(service_fn(|req: http::Request<Body>| async move {
-    ///        Ok::<_, MyError>(http::Response::new(Body::empty()))
-    ///    }))
-    ///    .with_auto_http()
-    ///    .with_tokio()
-    ///    .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await.unwrap();
-    /// # }
-    /// ```
     pub fn with_graceful_shutdown<F>(self, signal: F) -> GracefulShutdown<A, P, S, R, E, F>
     where
         S: MakeServiceRef<A::Connection, R>,

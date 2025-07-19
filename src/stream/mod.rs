@@ -36,7 +36,7 @@
 //!
 //! # async fn example() -> std::io::Result<()> {
 //! let socket = UdpSocket::bind("127.0.0.1:8080").await?;
-//! let listener = UdpListener::new(socket, 1024, 16);
+//! let listener = UdpListener::new(socket, 1024);
 //!
 //! // UDP listener provides connection-like semantics
 //! // for message-based protocol
