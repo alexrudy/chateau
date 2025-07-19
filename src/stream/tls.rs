@@ -5,13 +5,13 @@
 //! TLS configurations, allowing streams to gracefully handle both encrypted and
 //! unencrypted connections.
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 pub use crate::info::TlsConnectionInfo;
 use crate::info::tls::TlsConnectionInfoReceiver;
-use futures_core::Future;
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
