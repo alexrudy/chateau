@@ -140,7 +140,7 @@ pub struct GracefulConnectionDriver<C, E> {
     #[pin]
     conn: ConnectionDriver<C, E>,
     #[pin]
-    shutdown: notify::Notified,
+    shutdown: Option<notify::Notified>,
     finished: notify::Sender,
     span: Span,
 }
@@ -160,7 +160,7 @@ impl<C, E> GracefulConnectionDriver<C, E> {
     ) -> Self {
         Self {
             conn: ConnectionDriver::new(conn),
-            shutdown: shutdown.into_future(),
+            shutdown: Some(shutdown.into_future()),
             finished,
             span,
         }
@@ -188,17 +188,20 @@ where
                 Poll::Pending => {}
             };
 
-            match this.shutdown.as_mut().poll(cx) {
-                Poll::Ready(()) => {
-                    debug!("connection received shutdown signal");
-                    this.conn
-                        .as_mut()
-                        .project()
-                        .conn
-                        .inner_pin_mut()
-                        .graceful_shutdown();
+            if let Some(shutdown) = this.shutdown.as_mut().as_pin_mut() {
+                match shutdown.poll(cx) {
+                    Poll::Ready(()) => {
+                        debug!("connection received shutdown signal");
+                        this.conn
+                            .as_mut()
+                            .project()
+                            .conn
+                            .inner_pin_mut()
+                            .graceful_shutdown();
+                        this.shutdown.take();
+                    }
+                    Poll::Pending => return Poll::Pending,
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
     }
