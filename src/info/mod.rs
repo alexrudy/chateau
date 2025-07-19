@@ -8,6 +8,7 @@ pub mod tls;
 pub use self::tls::HasTlsConnectionInfo;
 #[cfg(feature = "tls")]
 pub use self::tls::TlsConnectionInfo;
+#[cfg(feature = "duplex")]
 #[doc(hidden)]
 pub use crate::stream::duplex::DuplexAddr;
 #[doc(hidden)]
@@ -35,6 +36,7 @@ where
     }
 }
 
+#[cfg(feature = "duplex")]
 impl ConnectionInfo<DuplexAddr> {
     /// Connection info for a duplex stream.
     pub fn duplex() -> Self {

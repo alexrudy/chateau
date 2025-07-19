@@ -1,5 +1,7 @@
 //! Duplex transport for patron clients
 
+#![cfg(feature = "duplex")]
+
 use std::io;
 use std::task::{Context, Poll};
 

@@ -21,6 +21,7 @@ use crate::client::default_tls_config;
 
 use crate::info::HasConnectionInfo;
 
+#[cfg(feature = "duplex")]
 pub mod duplex;
 #[cfg(feature = "mock")]
 pub mod mock;

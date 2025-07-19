@@ -44,6 +44,7 @@
 //! # }
 //! ```
 
+#[cfg(feature = "duplex")]
 pub mod duplex;
 pub mod tcp;
 #[cfg(feature = "tls")]
