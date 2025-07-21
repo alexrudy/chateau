@@ -202,16 +202,16 @@ where
                 let future = this.service.call(req);
                 this.tasks.push(future);
                 *this.service_ready = false;
-                return Ok(ReadAction::Spawned).into();
+                Ok(ReadAction::Spawned).into()
             }
 
             Some(Err(error)) => {
                 debug!("Codec Error");
-                return Err(error).into();
+                Err(error).into()
             }
             None => {
                 trace!("Codec Empty");
-                return Ok(ReadAction::Terminated).into();
+                Ok(ReadAction::Terminated).into()
             }
         }
     }
