@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -49,6 +48,7 @@ use super::conn::Connection;
 use super::conn::Connector;
 use super::conn::Protocol;
 use super::conn::Transport;
+use super::conn::dns::Resolver;
 
 /// Error building a key
 #[derive(Debug, thiserror::Error)]
@@ -59,9 +59,9 @@ pub struct KeyError {
 }
 
 /// Key which links an address and request to a connection.
-pub trait Key<A, R>: Eq + std::hash::Hash + fmt::Debug {
+pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
     /// Build a pool key from an address and request
-    fn build(addr: &A, request: &R) -> Result<Self, KeyError>
+    fn build(request: &R) -> Result<Self, KeyError>
     where
         Self: Sized;
 }
@@ -77,47 +77,43 @@ pub trait Key<A, R>: Eq + std::hash::Hash + fmt::Debug {
 /// the pool when dropped, if the connection is still open and has not been marked as reusable (reusable connections
 /// are always kept in the pool - there is no need to return dropped copies).
 #[derive(Debug)]
-pub(crate) struct Pool<C, A, R, K>
+pub(crate) struct Pool<C, R, K>
 where
     C: PoolableConnection<R>,
     R: Send + 'static,
-    K: Key<A, R>,
+    K: Key<R>,
 {
     inner: Arc<Mutex<PoolInner<C, R>>>,
 
     // NOTE: The token map is stored on the Pool, not the PoolInner so that the generic K argument doesn't
     // propogate into the pool inner and reference, only the connection type propogates.
     keys: Arc<Mutex<TokenMap<K>>>,
-
-    address: PhantomData<fn(A)>,
 }
 
-impl<C, A, R, K> Clone for Pool<C, A, R, K>
+impl<C, R, K> Clone for Pool<C, R, K>
 where
     R: Send + 'static,
     C: PoolableConnection<R>,
-    K: Key<A, R>,
+    K: Key<R>,
 {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             keys: self.keys.clone(),
-            address: PhantomData,
         }
     }
 }
 
-impl<C, A, R, K> Pool<C, A, R, K>
+impl<C, R, K> Pool<C, R, K>
 where
     R: Send + 'static,
     C: PoolableConnection<R>,
-    K: Key<A, R>,
+    K: Key<R>,
 {
     pub(crate) fn new(config: Config) -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolInner::new(config))),
             keys: Arc::new(Mutex::new(TokenMap::default())),
-            address: PhantomData,
         }
     }
 
@@ -128,23 +124,22 @@ where
     }
 }
 
-impl<C, A, R, K> Default for Pool<C, A, R, K>
+impl<C, R, K> Default for Pool<C, R, K>
 where
     R: Send + 'static,
     C: PoolableConnection<R>,
-    K: Key<A, R>,
+    K: Key<R>,
 {
     fn default() -> Self {
         Self::new(Config::default())
     }
 }
 
-impl<C, A, R, K> Pool<C, A, R, K>
+impl<C, R, K> Pool<C, R, K>
 where
     R: Send + 'static,
     C: PoolableConnection<R>,
-    K: Key<A, R>,
-    A: Send + 'static,
+    K: Key<R>,
 {
     /// Create a checkout for a connection to the given key (host/port pair).
     ///
@@ -159,31 +154,35 @@ where
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
     #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
-    pub(crate) fn checkout<T, P>(
+    pub(crate) fn checkout<D, T, P>(
         &self,
         key: K,
         multiplex: bool,
-        connector: Connector<T, A, P, R>,
-    ) -> Checkout<T, A, P, R>
+        connector: Connector<D, T, P, R>,
+    ) -> Checkout<D, T, P, R>
     where
-        T: Transport<A>,
+        D: Resolver<R> + Send + 'static,
+        D::Address: Send,
+        D::Future: Send,
+        T: Transport<D::Address>,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
         C: PoolableConnection<R>,
     {
         let mut inner = self.inner.lock();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut connector: Option<Connector<T, A, P, R>> = Some(connector);
+        let mut connector: Option<Connector<D, T, P, R>> = Some(connector);
         let token = self.keys.lock().insert(key);
 
         if let Some(connection) = inner.pop(token) {
             trace!("connection found in pool");
-            connector = None;
+            let request = connector.take().map(|mut c| c.take_request_unpinned());
             return Checkout::new(
                 token,
                 self.as_ref(),
                 rx,
                 connector,
                 Some(connection),
+                request,
                 &inner.config,
             );
         }
@@ -193,8 +192,16 @@ where
 
         if inner.connecting.contains(&token) {
             trace!("connection in progress elsewhere, will wait");
-            connector = None;
-            Checkout::new(token, self.as_ref(), rx, connector, None, &inner.config)
+            let request = connector.take().map(|mut c| c.take_request_unpinned());
+            Checkout::new(
+                token,
+                self.as_ref(),
+                rx,
+                connector,
+                None,
+                request,
+                &inner.config,
+            )
         } else {
             if multiplex {
                 // Only block new connection attempts if we can multiplex on this one.
@@ -202,7 +209,15 @@ where
                 inner.connecting.insert(token);
             }
             trace!("connecting to host");
-            Checkout::new(token, self.as_ref(), rx, connector, None, &inner.config)
+            Checkout::new(
+                token,
+                self.as_ref(),
+                rx,
+                connector,
+                None,
+                None,
+                &inner.config,
+            )
         }
     }
 }
@@ -686,14 +701,14 @@ mod tests {
     use super::*;
     use crate::client::conn::connector::Error;
     use crate::client::conn::protocol::mock::{MockRequest, MockSender};
-    use crate::client::conn::stream::mock::{MockAddress, MockStream};
+    use crate::client::conn::stream::mock::MockStream;
     use crate::client::conn::transport::mock::MockTransport;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct MockKey;
 
-    impl super::Key<MockAddress, MockRequest> for MockKey {
-        fn build(_: &MockAddress, _: &MockRequest) -> Result<Self, KeyError>
+    impl super::Key<MockRequest> for MockKey {
+        fn build(_: &MockRequest) -> Result<Self, KeyError>
         where
             Self: Sized,
         {
@@ -706,14 +721,14 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
 
         let config = Config::default();
-        let pool: Pool<MockSender, MockAddress, MockRequest, MockKey> = Pool::new(config);
+        let pool: Pool<MockSender, MockRequest, MockKey> = Pool::new(config);
 
         assert!(pool.inner.lock().config.idle_timeout.unwrap() > Duration::from_secs(1));
         assert!(pool.inner.lock().config.max_idle_per_host > 0);
         assert!(pool.inner.lock().config.max_idle_per_host < 2048);
     }
 
-    assert_impl_all!(Pool<MockSender, MockAddress, MockRequest, MockKey>: Clone);
+    assert_impl_all!(Pool<MockSender, MockRequest, MockKey>: Clone);
 
     #[tokio::test]
     async fn checkout_simple() {
@@ -731,7 +746,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 false,
-                MockTransport::single().connector(MockAddress),
+                MockTransport::single().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -744,7 +759,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 false,
-                MockTransport::single().connector(MockAddress),
+                MockTransport::single().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -755,7 +770,7 @@ mod tests {
         drop(conn);
 
         let c2 = pool
-            .checkout(key, false, MockTransport::single().connector(MockAddress))
+            .checkout(key, false, MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -779,7 +794,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 true,
-                MockTransport::reusable().connector(MockAddress),
+                MockTransport::reusable().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -792,7 +807,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 true,
-                MockTransport::reusable().connector(MockAddress),
+                MockTransport::reusable().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -806,7 +821,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 true,
-                MockTransport::reusable().connector(MockAddress),
+                MockTransport::reusable().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -830,7 +845,7 @@ mod tests {
         let mut checkout_a = std::pin::pin!(pool.checkout(
             key.clone(),
             true,
-            MockTransport::channel(rx).connector(MockAddress)
+            MockTransport::channel(rx).connector(MockRequest)
         ));
 
         assert!(futures_util::poll!(&mut checkout_a).is_pending());
@@ -838,7 +853,7 @@ mod tests {
         let mut checkout_b = std::pin::pin!(pool.checkout(
             key.clone(),
             true,
-            MockTransport::reusable().connector(MockAddress),
+            MockTransport::reusable().connector(MockRequest),
         ));
 
         assert!(futures_util::poll!(&mut checkout_b).is_pending());
@@ -872,7 +887,7 @@ mod tests {
         let checkout = pool.checkout(
             key.clone(),
             false,
-            MockTransport::single().connector(MockAddress),
+            MockTransport::single().connector(MockRequest),
         );
 
         let token = checkout.token();
@@ -909,7 +924,7 @@ mod tests {
         let checkout = pool.checkout(
             key.clone(),
             false,
-            MockTransport::single().connector(MockAddress),
+            MockTransport::single().connector(MockRequest),
         );
 
         let token = checkout.token();
@@ -955,13 +970,13 @@ mod tests {
         let start = pool.checkout(
             key.clone(),
             true,
-            MockTransport::reusable().connector(MockAddress),
+            MockTransport::reusable().connector(MockRequest),
         );
 
         let checkout = pool.checkout(
             key.clone(),
             true,
-            MockTransport::reusable().connector(MockAddress),
+            MockTransport::reusable().connector(MockRequest),
         );
 
         drop(start);
@@ -985,7 +1000,7 @@ mod tests {
         let checkout = pool.checkout(
             key.clone(),
             true,
-            MockTransport::reusable().connector(MockAddress),
+            MockTransport::reusable().connector(MockRequest),
         );
 
         drop(pool);
@@ -1008,7 +1023,7 @@ mod tests {
         let checkout = pool.checkout(
             key.clone(),
             true,
-            MockTransport::error().connector(MockAddress),
+            MockTransport::error().connector(MockRequest),
         );
 
         let outcome = checkout.now_or_never().unwrap();
@@ -1033,7 +1048,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 false,
-                MockTransport::single().connector(MockAddress),
+                MockTransport::single().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -1046,7 +1061,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 false,
-                MockTransport::single().connector(MockAddress),
+                MockTransport::single().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -1057,7 +1072,7 @@ mod tests {
         drop(conn);
 
         let c2 = pool
-            .checkout(key, false, MockTransport::single().connector(MockAddress))
+            .checkout(key, false, MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -1081,7 +1096,7 @@ mod tests {
             .checkout(
                 key.clone(),
                 false,
-                MockTransport::single().connector(MockAddress),
+                MockTransport::single().connector(MockRequest),
             )
             .await
             .unwrap();
@@ -1092,7 +1107,7 @@ mod tests {
         let checkout = pool.checkout(
             key.clone(),
             false,
-            MockTransport::single().connector(MockAddress),
+            MockTransport::single().connector(MockRequest),
         );
 
         let token = checkout.token();

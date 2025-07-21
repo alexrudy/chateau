@@ -1,7 +1,10 @@
 //! DNS resolution utilities.
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
+use std::future::{Ready, ready};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::task::{Context, Poll};
 
 /// A collection of socket addresses.
 #[derive(Debug, Clone, Default)]
@@ -175,5 +178,73 @@ impl IpVersionExt for IpAddr {
             IpAddr::V4(_) => IpVersion::V4,
             IpAddr::V6(_) => IpVersion::V6,
         }
+    }
+}
+
+/// A service to convert request references into destination addresses.
+///
+/// Commonly, this might be a DNS lookup, but other schemes are possible.
+pub trait Resolver<Request> {
+    /// Address type returned
+    type Address;
+
+    /// Resolution error returned
+    type Error;
+
+    /// Future type that the resolver uses to work.
+    type Future: Future<Output = Result<Self::Address, Self::Error>>;
+
+    /// Check if the resolver is ready to resolve.
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+
+    /// Return a future representing the work the resolver does.
+    fn resolve(&mut self, request: &Request) -> Self::Future;
+}
+
+impl<T, F, R, A, E> Resolver<R> for T
+where
+    T: for<'a> tower::Service<&'a R, Response = A, Error = E, Future = F>,
+    F: Future<Output = Result<A, E>>,
+{
+    type Address = A;
+    type Error = E;
+    type Future = F;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        tower::Service::poll_ready(self, cx)
+    }
+
+    fn resolve(&mut self, request: &R) -> Self::Future {
+        tower::Service::call(self, request)
+    }
+}
+
+/// A static address resolver always returns the same address
+#[derive(Debug)]
+pub struct StaticResolver<A> {
+    address: A,
+}
+
+impl<A> StaticResolver<A> {
+    /// Create a new static-address resolver
+    pub fn new(address: A) -> Self {
+        Self { address }
+    }
+}
+
+impl<R, A> tower::Service<&R> for StaticResolver<A>
+where
+    A: Clone,
+{
+    type Response = A;
+    type Error = Infallible;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: &R) -> Self::Future {
+        ready(Ok(self.address.clone()))
     }
 }

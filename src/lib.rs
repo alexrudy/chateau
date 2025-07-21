@@ -2,7 +2,9 @@
 
 use std::{fmt, pin::Pin};
 
+#[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "happy_eyeballs")]
 pub(crate) mod happy_eyeballs;
 pub mod info;
 #[cfg(feature = "server")]

@@ -16,6 +16,7 @@ use crate::client::conn::Protocol;
 use crate::client::conn::Transport;
 use crate::client::conn::connector::Error as ConnectorError;
 use crate::client::conn::connector::{Connector, ConnectorMeta};
+use crate::client::conn::dns::Resolver;
 
 #[cfg(debug_assertions)]
 use self::ids::CheckoutId;
@@ -141,24 +142,25 @@ where
 }
 
 #[pin_project(project = CheckoutConnectingProj)]
-pub(crate) enum InnerCheckoutConnecting<T, A, P, R>
+pub(crate) enum InnerCheckoutConnecting<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
 {
     Waiting,
     Connected,
-    Connecting(Pin<Box<Connector<T, A, P, R>>>),
-    ConnectingWithDelayDrop(Option<Pin<Box<Connector<T, A, P, R>>>>),
-    ConnectingDelayed(Pin<Box<Connector<T, A, P, R>>>),
+    Connecting(Pin<Box<Connector<D, T, P, R>>>),
+    ConnectingWithDelayDrop(Option<Pin<Box<Connector<D, T, P, R>>>>),
+    ConnectingDelayed(Pin<Box<Connector<D, T, P, R>>>),
 }
 
-impl<T, A, P, R> fmt::Debug for InnerCheckoutConnecting<T, A, P, R>
+impl<D, T, P, R> fmt::Debug for InnerCheckoutConnecting<D, T, P, R>
 where
-    T: Transport<A>,
-    A: fmt::Debug,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
@@ -182,10 +184,12 @@ where
 }
 
 #[pin_project(PinnedDrop)]
-pub(crate) struct Checkout<T, A, P, R>
+pub(crate) struct Checkout<D, T, P, R>
 where
-    T: Transport<A> + 'static,
-    A: Send + 'static,
+    D: Resolver<R> + Send + 'static,
+    D::Address: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Send + 'static,
     P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
@@ -195,17 +199,20 @@ where
     #[pin]
     waiter: Waiting<P::Connection, R>,
     #[pin]
-    inner: InnerCheckoutConnecting<T, A, P, R>,
+    inner: InnerCheckoutConnecting<D, T, P, R>,
+    request: Option<R>,
     connection: Option<P::Connection>,
     meta: ConnectorMeta,
     #[cfg(debug_assertions)]
     id: CheckoutId,
 }
 
-impl<T, A, P, R> fmt::Debug for Checkout<T, A, P, R>
+impl<D, T, P, R> fmt::Debug for Checkout<D, T, P, R>
 where
-    T: Transport<A> + Send + 'static,
-    A: fmt::Debug + Send + 'static,
+    D: Resolver<R> + Send + 'static,
+    D::Address: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Send + 'static,
     P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
@@ -220,11 +227,13 @@ where
     }
 }
 
-impl<T, A, P, R, C> Checkout<T, A, P, R>
+impl<D, T, P, R> Checkout<D, T, P, R>
 where
-    T: Transport<A> + 'static,
-    A: Send + 'static,
-    P: Protocol<T::IO, R, Connection = C> + Send + 'static,
+    D: Resolver<R> + Send + 'static,
+    D::Address: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Send + 'static,
+    P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
 {
@@ -240,6 +249,7 @@ where
                     pool: this.pool.clone(),
                     waiter: Waiting::NoPool,
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
+                    request: None,
                     connection: None,
                     meta: ConnectorMeta::new(), // New meta to avoid holding spans in the spawned task
                     #[cfg(debug_assertions)]
@@ -255,6 +265,14 @@ where
         self.token
     }
 
+    pub(crate) fn take_request_pinned(mut self: Pin<&mut Self>) -> R {
+        self.as_mut()
+            .project()
+            .request
+            .take()
+            .expect("request is available")
+    }
+
     /// Constructs a checkout which does not hold a reference to the pool
     /// and so is only waiting on the connector.
     ///
@@ -265,7 +283,7 @@ where
     /// This is useful when using a checkout to poll a connection to readiness
     /// without a pool, or in a context in which the associated connection cannot
     /// or should not be shared with the pool.
-    pub(crate) fn detached(connector: Connector<T, A, P, R>) -> Self {
+    pub(crate) fn detached(connector: Connector<D, T, P, R>) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
 
@@ -277,6 +295,7 @@ where
             pool: PoolRef::none(),
             waiter: Waiting::NoPool,
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
+            request: None,
             connection: None,
             meta: ConnectorMeta::new(),
             #[cfg(debug_assertions)]
@@ -288,8 +307,9 @@ where
         token: Token,
         pool: PoolRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
-        connect: Option<Connector<T, A, P, R>>,
+        connect: Option<Connector<D, T, P, R>>,
         connection: Option<P::Connection>,
+        request: Option<R>,
         config: &Config,
     ) -> Self {
         #[cfg(debug_assertions)]
@@ -306,6 +326,7 @@ where
                 pool,
                 waiter: Waiting::Idle(waiter),
                 inner: InnerCheckoutConnecting::Connected,
+                request: request.or(connect.map(|mut c| c.take_request_unpinned())),
                 connection,
                 meta,
                 #[cfg(debug_assertions)]
@@ -325,6 +346,7 @@ where
                 pool,
                 waiter: Waiting::Idle(waiter),
                 inner,
+                request,
                 connection,
                 meta,
                 #[cfg(debug_assertions)]
@@ -337,6 +359,7 @@ where
                 pool,
                 waiter: Waiting::Connecting(waiter),
                 inner: InnerCheckoutConnecting::Waiting,
+                request,
                 connection,
                 meta,
                 #[cfg(debug_assertions)]
@@ -346,17 +369,23 @@ where
     }
 }
 
-impl<T, A, P, R> Future for Checkout<T, A, P, R>
+impl<D, T, P, R> Future for Checkout<D, T, P, R>
 where
-    T: Transport<A> + 'static,
-    A: Send + 'static,
+    D: Resolver<R> + Send + 'static,
+    D::Address: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Send + 'static,
     P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
 {
     type Output = Result<
         Pooled<P::Connection, R>,
-        ConnectorError<<T as Transport<A>>::Error, <P as Protocol<T::IO, R>>::Error>,
+        ConnectorError<
+            D::Error,
+            <T as Transport<D::Address>>::Error,
+            <P as Protocol<T::IO, R>>::Error,
+        >,
     >;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -374,6 +403,15 @@ where
             // from containing multiple connections if they can be multiplexed.
             if let WaitingPoll::Connected(connection) = ready!(this.waiter.as_mut().poll(cx)) {
                 debug!(token=?this.token, "connection recieved from waiter");
+
+                match this.inner.as_mut().project() {
+                    CheckoutConnectingProj::ConnectingWithDelayDrop(Some(connector))
+                    | CheckoutConnectingProj::ConnectingDelayed(connector)
+                    | CheckoutConnectingProj::Connecting(connector) => {
+                        *this.request = Some(connector.as_mut().take_request_pinned());
+                    }
+                    _ => {}
+                };
 
                 return Poll::Ready(Ok(connection));
             }
@@ -420,6 +458,7 @@ where
                 ));
 
                 this.waiter.close();
+                *this.request = Some(connector.as_mut().take_request_pinned());
                 this.inner.set(InnerCheckoutConnecting::Connected);
 
                 match result {
@@ -450,6 +489,7 @@ where
                 ));
 
                 this.waiter.close();
+                *this.request = Some(connector.as_mut().take_request_pinned());
                 this.inner.set(InnerCheckoutConnecting::Connected);
 
                 match result {
@@ -506,13 +546,15 @@ where
 }
 
 #[pinned_drop]
-impl<T, A, P, R> PinnedDrop for Checkout<T, A, P, R>
+impl<D, T, P, R> PinnedDrop for Checkout<D, T, P, R>
 where
-    T: Transport<A> + 'static,
+    D: Resolver<R> + Send + 'static,
+    D::Address: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Send + 'static,
     P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
-    A: Send + 'static,
 {
     fn drop(mut self: Pin<&mut Self>) {
         #[cfg(debug_assertions)]
@@ -537,7 +579,7 @@ mod test {
 
     use static_assertions::assert_impl_all;
 
-    assert_impl_all!(ConnectorError<std::io::Error, std::io::Error>: std::error::Error, Send, Sync, Into<BoxError>);
+    assert_impl_all!(ConnectorError<std::io::Error, std::io::Error, std::io::Error>: std::error::Error, Send, Sync, Into<BoxError>);
 
     use crate::BoxError;
 
@@ -556,11 +598,11 @@ mod test {
     #[cfg(feature = "mock")]
     #[tokio::test]
     async fn detatched_checkout() {
-        use crate::client::conn::stream::mock::MockAddress;
+        use crate::client::conn::protocol::mock::MockRequest;
 
         let transport = MockTransport::single();
 
-        let checkout = Checkout::detached(transport.connector(MockAddress));
+        let checkout = Checkout::detached(transport.connector(MockRequest));
 
         assert!(checkout.token.is_zero());
         assert!(checkout.pool.is_none());

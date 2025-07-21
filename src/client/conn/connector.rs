@@ -12,7 +12,6 @@
 use std::fmt;
 use std::future::Future;
 use std::future::IntoFuture;
-use std::marker::PhantomData;
 use std::pin::Pin;
 
 use std::task::Context;
@@ -30,8 +29,11 @@ use crate::info::HasConnectionInfo;
 
 use crate::client::conn::connection::Connection;
 
+use super::dns::Resolver;
+
 pub(in crate::client) struct ConnectorMeta {
     overall_span: tracing::Span,
+    resolver_span: Option<tracing::Span>,
     transport_span: Option<tracing::Span>,
     protocol_span: Option<tracing::Span>,
 }
@@ -42,6 +44,7 @@ impl ConnectorMeta {
 
         Self {
             overall_span,
+            resolver_span: None,
             transport_span: None,
             protocol_span: None,
         }
@@ -50,6 +53,11 @@ impl ConnectorMeta {
     #[allow(dead_code)]
     pub(in crate::client) fn current(&self) -> &tracing::Span {
         &self.overall_span
+    }
+
+    pub(in crate::client) fn resolver(&mut self) -> &tracing::Span {
+        self.resolver_span
+            .get_or_insert_with(|| tracing::trace_span!(parent: &self.overall_span, "resolver"))
     }
 
     pub(in crate::client) fn transport(&mut self) -> &tracing::Span {
@@ -66,7 +74,11 @@ impl ConnectorMeta {
 /// Error that can occur during the connection process.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Error<Transport, Protocol> {
+pub enum Error<Resolver, Transport, Protocol> {
+    /// Error resolving address from request
+    #[error("resolving address")]
+    Resolving(#[source] Resolver),
+
     /// Error occurred during the connection
     #[error("creating connection")]
     Connecting(#[source] Transport),
@@ -83,7 +95,11 @@ pub enum Error<Transport, Protocol> {
 /// Error that can occur during the connection and serving process.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum ConnectionError<T, P, S> {
+pub enum ConnectionError<D, T, P, S> {
+    /// Error occurred during the address resolution
+    #[error("resolving address")]
+    Resolving(#[source] D),
+
     /// Error occurred during the connection
     #[error("creating connection")]
     Connecting(#[source] T),
@@ -105,9 +121,10 @@ pub enum ConnectionError<T, P, S> {
     Key(#[from] KeyError),
 }
 
-impl<T, P, S> From<Error<T, P>> for ConnectionError<T, P, S> {
-    fn from(value: Error<T, P>) -> Self {
+impl<D, T, P, S> From<Error<D, T, P>> for ConnectionError<D, T, P, S> {
+    fn from(value: Error<D, T, P>) -> Self {
         match value {
+            Error::Resolving(d) => ConnectionError::Resolving(d),
             Error::Connecting(t) => ConnectionError::Connecting(t),
             Error::Handshaking(p) => ConnectionError::Handshaking(p),
             Error::Unavailable => ConnectionError::Unavailable,
@@ -117,13 +134,26 @@ impl<T, P, S> From<Error<T, P>> for ConnectionError<T, P, S> {
 
 #[pin_project(project = ConnectorStateProjected)]
 #[allow(clippy::large_enum_variant)]
-enum ConnectorState<T, A, P, R>
+enum ConnectorState<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
+    PollReadyResolver {
+        resolver: Option<D>,
+        transport: Option<T>,
+        protocol: Option<P>,
+    },
+    Resolve {
+        #[pin]
+        future: D::Future,
+        transport: Option<T>,
+        protocol: Option<P>,
+    },
+
     PollReadyTransport {
-        address: Option<A>,
+        address: Option<D::Address>,
         transport: Option<T>,
         protocol: Option<P>,
     },
@@ -139,22 +169,23 @@ where
     Handshake {
         #[pin]
         future: <P as Protocol<T::IO, R>>::Future,
-        info: ConnectionInfo<<T::IO as HasConnectionInfo>::Addr>,
+        info: ConnectionInfo<D::Address>,
     },
 }
 
-impl<T, A, P, R> fmt::Debug for ConnectorState<T, A, P, R>
+impl<D, T, P, R> fmt::Debug for ConnectorState<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
-    A: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConnectorState::PollReadyTransport { address, .. } => f
-                .debug_struct("PollReadyTransport")
-                .field("address", &address.as_ref().unwrap())
-                .finish(),
+            ConnectorState::PollReadyResolver { .. } => f.debug_tuple("PollReadyResolver").finish(),
+            ConnectorState::Resolve { .. } => f.debug_tuple("Resolve").finish(),
+            ConnectorState::PollReadyTransport { .. } => {
+                f.debug_tuple("PollReadyTransport").finish()
+            }
             ConnectorState::Connect { .. } => f.debug_tuple("Connect").finish(),
             ConnectorState::PollReadyHandshake { .. } => {
                 f.debug_tuple("PollReadyHandshake").finish()
@@ -167,21 +198,23 @@ where
 /// A connector combines the futures required to connect to a transport
 /// and then complete the transport's associated startup handshake.
 #[pin_project]
-pub struct Connector<T, A, P, R>
+pub struct Connector<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
     #[pin]
-    state: ConnectorState<T, A, P, R>,
+    state: ConnectorState<D, T, P, R>,
+    request: Option<R>,
     shareable: bool,
 }
 
-impl<T, A, P, R> fmt::Debug for Connector<T, A, P, R>
+impl<D, T, P, R> fmt::Debug for Connector<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
-    A: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Connector")
@@ -190,37 +223,57 @@ where
     }
 }
 
-impl<T, A, P, R> Connector<T, A, P, R>
+impl<D, T, P, R> Connector<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
     /// Create a new connection from a transport connector and a protocol.
-    pub fn new(transport: T, protocol: P, address: A) -> Self {
+    pub fn new(resolver: D, transport: T, protocol: P, request: R) -> Self {
         //TODO: Fix this
         let shareable = false;
 
         Self {
-            state: ConnectorState::PollReadyTransport {
-                address: Some(address),
+            state: ConnectorState::PollReadyResolver {
+                resolver: Some(resolver),
                 transport: Some(transport),
                 protocol: Some(protocol),
             },
             shareable,
+            request: Some(request),
         }
+    }
+
+    /// Unwrap the connector returning just the inner request while it is pinned
+    pub(crate) fn take_request_pinned(mut self: Pin<&mut Self>) -> R {
+        self.as_mut()
+            .project()
+            .request
+            .take()
+            .expect("Request unavailalbe after polling")
+    }
+
+    /// Unwrap the connector returning just the inner request.
+    pub(crate) fn take_request_unpinned(&mut self) -> R {
+        self.request
+            .take()
+            .expect("Request unavailalbe after polling")
     }
 }
 
 #[allow(type_alias_bounds)]
-type ConnectorError<T, A, P, R>
+type ConnectorError<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
-= Error<<T as Transport<A>>::Error, <P as Protocol<T::IO, R>>::Error>;
+= Error<D::Error, <T as Transport<D::Address>>::Error, <P as Protocol<T::IO, R>>::Error>;
 
-impl<T, A, P, R> Connector<T, A, P, R>
+impl<D, T, P, R> Connector<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
     pub(in crate::client) fn poll_connector<F>(
@@ -228,7 +281,7 @@ where
         notify: F,
         meta: &mut ConnectorMeta,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<P::Connection, ConnectorError<T, A, P, R>>>
+    ) -> Poll<Result<P::Connection, ConnectorError<D, T, P, R>>>
     where
         F: FnOnce(),
     {
@@ -237,8 +290,60 @@ where
 
         loop {
             match connector_projected.state.as_mut().project() {
+                ConnectorStateProjected::PollReadyResolver {
+                    resolver,
+                    transport,
+                    protocol,
+                } => {
+                    let _entered = meta.resolver().enter();
+                    {
+                        let resolver = resolver.as_mut().unwrap();
+                        if let Err(error) = ready!(resolver.poll_ready(cx)) {
+                            return Poll::Ready(Err(Error::Resolving(error)));
+                        }
+                    }
+                    let mut resolver = resolver
+                        .take()
+                        .expect("connector polled in invalid state (resolver)");
+                    let future = resolver.resolve(
+                        connector_projected
+                            .request
+                            .as_ref()
+                            .expect("connector polled in invalid state (request)"),
+                    );
+                    let transport = transport.take();
+                    let protocol = protocol.take();
+
+                    tracing::trace!("resolver ready");
+                    connector_projected.state.set(ConnectorState::Resolve {
+                        future,
+                        transport,
+                        protocol,
+                    });
+                }
+                ConnectorStateProjected::Resolve {
+                    future,
+                    transport,
+                    protocol,
+                } => {
+                    let _entered = meta.resolver().enter();
+                    let address = match ready!(future.poll(cx)) {
+                        Ok(address) => address,
+                        Err(error) => return Poll::Ready(Err(Error::Resolving(error))),
+                    };
+
+                    let transport = transport.take();
+                    let protocol = protocol.take();
+                    connector_projected
+                        .state
+                        .set(ConnectorState::PollReadyTransport {
+                            address: Some(address),
+                            transport,
+                            protocol,
+                        })
+                }
                 ConnectorStateProjected::PollReadyTransport {
-                    address: parts,
+                    address,
                     transport,
                     protocol,
                 } => {
@@ -252,11 +357,11 @@ where
 
                     let mut transport = transport
                         .take()
-                        .expect("future polled in invalid state: transport is None");
+                        .expect("connector polled in invalid state (transport)");
                     let future = transport.connect(
-                        parts
+                        address
                             .take()
-                            .expect("future polled in invalid state: parts is None"),
+                            .expect("connector polled in invalid state (address)"),
                     );
                     let protocol = protocol.take();
 
@@ -337,21 +442,22 @@ where
 
 /// A future that resolves to a connection.
 #[pin_project]
-pub struct ConnectorFuture<T, A, P, R>
+pub struct ConnectorFuture<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
     #[pin]
-    connector: Connector<T, A, P, R>,
+    connector: Connector<D, T, P, R>,
     meta: ConnectorMeta,
 }
 
-impl<T, A, P, R> fmt::Debug for ConnectorFuture<T, A, P, R>
+impl<D, T, P, R> fmt::Debug for ConnectorFuture<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
-    A: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("ConnectorFuture")
@@ -360,27 +466,39 @@ where
     }
 }
 
-impl<T, A, P, R> Future for ConnectorFuture<T, A, P, R>
+impl<D, T, P, R> Future for ConnectorFuture<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
-    type Output = Result<P::Connection, ConnectorError<T, A, P, R>>;
+    type Output = Result<(P::Connection, R), ConnectorError<D, T, P, R>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.as_mut().project();
+        let mut this = self.as_mut().project();
 
-        this.connector.poll_connector(|| (), this.meta, cx)
+        let connection = ready!(this.connector.as_mut().poll_connector(|| (), this.meta, cx));
+        Poll::Ready(connection.map(|c| {
+            (
+                c,
+                this.connector
+                    .project()
+                    .request
+                    .take()
+                    .expect("connector polled in invalid state (request)"),
+            )
+        }))
     }
 }
 
-impl<T, A, P, R> IntoFuture for Connector<T, A, P, R>
+impl<D, T, P, R> IntoFuture for Connector<D, T, P, R>
 where
-    T: Transport<A>,
+    D: Resolver<R>,
+    T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
-    type Output = Result<P::Connection, ConnectorError<T, A, P, R>>;
-    type IntoFuture = ConnectorFuture<T, A, P, R>;
+    type Output = Result<(P::Connection, R), ConnectorError<D, T, P, R>>;
+    type IntoFuture = ConnectorFuture<D, T, P, R>;
 
     fn into_future(self) -> Self::IntoFuture {
         let meta = ConnectorMeta::new();
@@ -396,81 +514,80 @@ where
 ///
 /// No pooling is done.
 #[derive(Debug, Clone)]
-pub struct ConnectorLayer<T, A, P> {
+pub struct ConnectorLayer<D, T, P> {
+    resolver: D,
     transport: T,
     protocol: P,
-    address: PhantomData<fn(A)>,
 }
 
-impl<T, A, P> ConnectorLayer<T, A, P> {
+impl<D, T, P> ConnectorLayer<D, T, P> {
     /// Create a new `ConnectorLayer` wrapping the given transport and protocol.
-    pub fn new(transport: T, protocol: P) -> Self {
+    pub fn new(resolver: D, transport: T, protocol: P) -> Self {
         Self {
+            resolver,
             transport,
             protocol,
-            address: PhantomData,
         }
     }
 }
 
-impl<S, T, A, P> tower::layer::Layer<S> for ConnectorLayer<T, A, P>
+impl<S, D, T, P> tower::layer::Layer<S> for ConnectorLayer<D, T, P>
 where
+    D: Clone,
     T: Clone,
     P: Clone,
 {
-    type Service = ConnectorService<S, T, A, P>;
+    type Service = ConnectorService<S, D, T, P>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        ConnectorService::new(inner, self.transport.clone(), self.protocol.clone())
+        ConnectorService::new(
+            inner,
+            self.resolver.clone(),
+            self.transport.clone(),
+            self.protocol.clone(),
+        )
     }
-}
-
-/// A trait to mark a request type as capable of providing an address
-pub trait Addressable<Addr> {
-    /// Get the correct address type for this request
-    fn address(&self) -> Addr;
 }
 
 /// A service that opens a connection with a given transport and protocol.
 #[derive(Debug, Clone)]
-pub struct ConnectorService<S, T, A, P> {
+pub struct ConnectorService<S, D, T, P> {
     inner: S,
+    resolver: D,
     transport: T,
     protocol: P,
-    address: PhantomData<fn(A)>,
 }
 
-impl<S, T, A, P> ConnectorService<S, T, A, P> {
+impl<S, D, T, P> ConnectorService<S, D, T, P> {
     /// Create a new `ConnectorService` wrapping the given service, transport, and protocol.
-    pub fn new(inner: S, transport: T, protocol: P) -> Self {
+    pub fn new(inner: S, resolver: D, transport: T, protocol: P) -> Self {
         Self {
             inner,
+            resolver,
             transport,
             protocol,
-            address: PhantomData,
         }
     }
 }
 
-impl<S, T, A, P, Req> tower::Service<Req> for ConnectorService<S, T, A, P>
+impl<S, D, T, P, Req> tower::Service<Req> for ConnectorService<S, D, T, P>
 where
-    Req: Addressable<A>,
+    D: Resolver<Req> + Clone + Send + Sync + 'static,
     P: Protocol<T::IO, Req> + Clone + Send + Sync + 'static,
     P::Connection: Connection<Req>,
-    T: Transport<A> + Clone + Send + 'static,
+    T: Transport<D::Address> + Clone + Send + 'static,
     T::IO: Unpin,
-    A: Send,
     S: tower::Service<
             (P::Connection, Req),
-            Response = <<P as Protocol<<T as Transport<A>>::IO, Req>>::Connection as Connection<Req>>::Response,
+            Response = <<P as Protocol<<T as Transport<D::Address>>::IO, Req>>::Connection as Connection<Req>>::Response,
         > + Clone
         + Send
         + 'static,
     S::Error: Send + 'static,
 {
     type Response = S::Response;
-    type Error = ConnectionError<T::Error, <P as Protocol<T::IO, Req>>::Error, S::Error>;
-    type Future = self::future::ResponseFuture<T, A, P, P::Connection, S, Req, S::Response>;
+    type Error = ConnectionError<D::Error, T::Error, <P as Protocol<T::IO, Req>>::Error, S::Error>;
+    type Future = self::future::ResponseFuture<D, T, P, P::Connection, S, Req, S::Response>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.transport
@@ -480,9 +597,9 @@ where
 
     fn call(&mut self, req: Req) -> Self::Future {
         let connector =
-            Connector::new(self.transport.clone(), self.protocol.clone(), req.address());
+            Connector::new(self.resolver.clone(), self.transport.clone(), self.protocol.clone(), req);
 
-        self::future::ResponseFuture::new(connector, req, self.inner.clone())
+        self::future::ResponseFuture::new(connector, self.inner.clone())
     }
 }
 
@@ -496,27 +613,29 @@ mod future {
     use pin_project::pin_project;
 
     use super::ConnectionError;
-    use crate::client::conn::{Connection, Protocol, Transport};
+    use crate::client::conn::{Connection, Protocol, Transport, dns::Resolver};
 
     /// A future that resolves to an HTTP response.
     #[pin_project]
-    pub struct ResponseFuture<T, A, P, C, S, Req, Res>
+    pub struct ResponseFuture<D, T, P, C, S, Req, Res>
     where
-        T: Transport<A> + Send + 'static,
+        D: Resolver<Req>,
+        T: Transport<D::Address> + Send + 'static,
         P: Protocol<T::IO, Req, Connection = C> + Send + 'static,
         C: Connection<Req>,
         S: tower::Service<(C, Req), Response = Res> + Send + 'static,
     {
         #[pin]
-        inner: ResponseFutureState<T, A, P, C, S, Req, Res>,
+        inner: ResponseFutureState<D, T, P, C, S, Req, Res>,
         meta: ConnectorMeta,
 
         _body: std::marker::PhantomData<fn(Req) -> Res>,
     }
 
-    impl<T, A, P, C, S, Req, Res> fmt::Debug for ResponseFuture<T, A, P, C, S, Req, Res>
+    impl<D, T, P, C, S, Req, Res> fmt::Debug for ResponseFuture<D, T, P, C, S, Req, Res>
     where
-        T: Transport<A> + Send + 'static,
+        D: Resolver<Req>,
+        T: Transport<D::Address> + Send + 'static,
         P: Protocol<T::IO, Req, Connection = C> + Send + 'static,
         C: Connection<Req>,
         S: tower::Service<(C, Req), Response = Res> + Send + 'static,
@@ -526,20 +645,17 @@ mod future {
         }
     }
 
-    impl<T, A, P, C, S, Req, Res> ResponseFuture<T, A, P, C, S, Req, Res>
+    impl<D, T, P, C, S, Req, Res> ResponseFuture<D, T, P, C, S, Req, Res>
     where
-        T: Transport<A> + Send + 'static,
+        D: Resolver<Req>,
+        T: Transport<D::Address> + Send + 'static,
         P: Protocol<T::IO, Req, Connection = C> + Send + 'static,
         C: Connection<Req>,
         S: tower::Service<(C, Req), Response = Res> + Send + 'static,
     {
-        pub(super) fn new(connector: Connector<T, A, P, Req>, request: Req, service: S) -> Self {
+        pub(super) fn new(connector: Connector<D, T, P, Req>, service: S) -> Self {
             Self {
-                inner: ResponseFutureState::Connect {
-                    connector,
-                    request: Some(request),
-                    service,
-                },
+                inner: ResponseFutureState::Connect { connector, service },
                 meta: ConnectorMeta::new(),
                 _body: std::marker::PhantomData,
             }
@@ -548,8 +664,9 @@ mod future {
         #[allow(dead_code)]
         fn error(
             error: ConnectionError<
+                D::Error,
                 T::Error,
-                <P as Protocol<<T as Transport<A>>::IO, Req>>::Error,
+                <P as Protocol<<T as Transport<D::Address>>::IO, Req>>::Error,
                 S::Error,
             >,
         ) -> Self {
@@ -561,9 +678,10 @@ mod future {
         }
     }
 
-    impl<T, A, P, C, S, Req, Res> Future for ResponseFuture<T, A, P, C, S, Req, Res>
+    impl<D, T, P, C, S, Req, Res> Future for ResponseFuture<D, T, P, C, S, Req, Res>
     where
-        T: Transport<A> + Send + 'static,
+        D: Resolver<Req>,
+        T: Transport<D::Address> + Send + 'static,
         P: Protocol<T::IO, Req, Connection = C> + Send + 'static,
         C: Connection<Req>,
         S: tower::Service<(C, Req), Response = Res> + Send + 'static,
@@ -571,8 +689,9 @@ mod future {
         type Output = Result<
             Res,
             ConnectionError<
+                D::Error,
                 T::Error,
-                <P as Protocol<<T as Transport<A>>::IO, Req>>::Error,
+                <P as Protocol<<T as Transport<D::Address>>::IO, Req>>::Error,
                 S::Error,
             >,
         >;
@@ -585,12 +704,18 @@ mod future {
                 let mut this = self.as_mut().project();
                 let next = match this.inner.as_mut().project() {
                     ResponseFutureStateProj::Connect {
-                        connector,
-                        request,
+                        mut connector,
                         service,
-                    } => match connector.poll_connector(|| (), this.meta, cx) {
+                    } => match connector.as_mut().poll_connector(|| (), this.meta, cx) {
                         Poll::Ready(Ok(conn)) => ResponseFutureState::Request(
-                            service.call((conn, request.take().expect("request polled again"))),
+                            service.call((
+                                conn,
+                                connector
+                                    .project()
+                                    .request
+                                    .take()
+                                    .expect("request polled again"),
+                            )),
                         ),
                         Poll::Ready(Err(error)) => {
                             return Poll::Ready(Err(error.into()));
@@ -621,24 +746,25 @@ mod future {
 
     #[pin_project(project=ResponseFutureStateProj)]
     #[allow(clippy::large_enum_variant)]
-    enum ResponseFutureState<T, A, P, C, S, Req, Res>
+    enum ResponseFutureState<D, T, P, C, S, Req, Res>
     where
-        T: Transport<A> + Send + 'static,
+        D: Resolver<Req>,
+        T: Transport<D::Address> + Send + 'static,
         P: Protocol<T::IO, Req, Connection = C> + Send + 'static,
         C: Connection<Req>,
         S: tower::Service<(C, Req), Response = Res> + Send + 'static,
     {
         Connect {
             #[pin]
-            connector: Connector<T, A, P, Req>,
-            request: Option<Req>,
+            connector: Connector<D, T, P, Req>,
             service: S,
         },
         ConnectionError(
             Option<
                 ConnectionError<
+                    D::Error,
                     T::Error,
-                    <P as Protocol<<T as Transport<A>>::IO, Req>>::Error,
+                    <P as Protocol<<T as Transport<D::Address>>::IO, Req>>::Error,
                     S::Error,
                 >,
             >,

@@ -1,6 +1,8 @@
 //! A transport full of empty implementations, suitable for testing behavior of transport-dependent code.
 
-use std::future::ready;
+use std::convert::Infallible;
+use std::future::{Ready, ready};
+use std::task::{Context, Poll};
 
 use thiserror::Error;
 
@@ -20,6 +22,24 @@ enum TransportMode {
     Reusable,
     ConnectionError,
     Channel(Option<tokio::sync::oneshot::Receiver<MockStream>>),
+}
+
+/// An address resolver that always returns mock addresses
+#[derive(Debug, Clone)]
+pub struct MockResolver {}
+
+impl tower::Service<&MockRequest> for MockResolver {
+    type Error = Infallible;
+    type Response = MockAddress;
+    type Future = Ready<Result<MockAddress, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: &MockRequest) -> Self::Future {
+        ready(Ok(MockAddress))
+    }
 }
 
 /// A mock transport that can be used to test connection behavior.
@@ -79,9 +99,9 @@ impl MockTransport {
     /// Create a new connector for the transport.
     pub fn connector(
         self,
-        address: MockAddress,
-    ) -> Connector<Self, MockAddress, MockProtocol, MockRequest> {
-        Connector::new(self, MockProtocol::default(), address)
+        request: MockRequest,
+    ) -> Connector<MockResolver, Self, MockProtocol, MockRequest> {
+        Connector::new(MockResolver {}, self, MockProtocol::default(), request)
     }
 }
 
