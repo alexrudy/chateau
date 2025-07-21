@@ -1,9 +1,17 @@
+#[cfg(feature = "tls")]
+use std::sync::Arc;
+
+#[cfg(feature = "tls")]
+use rustls::ServerConfig;
 use tower::make::Shared;
 
 use crate::rt::TokioExecutor;
 
 use super::Accept;
 use super::Server;
+
+#[cfg(feature = "tls")]
+use super::conn::tls::{TlsAcceptor, acceptor::TlsAcceptExt};
 
 /// Indicates that the Server requires an acceptor.
 #[derive(Debug, Clone, Copy, Default)]
@@ -125,6 +133,23 @@ impl<A, P, S, B, E> Server<A, P, S, B, E> {
             protocol: self.protocol,
             executor: self.executor,
             request: Default::default(),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<A, P, S, B, E> Server<A, P, S, B, E>
+where
+    A: Accept,
+{
+    /// Add TLS to this server
+    pub fn with_tls(self, config: Arc<ServerConfig>) -> Server<TlsAcceptor<A>, P, S, B, E> {
+        Server {
+            acceptor: self.acceptor.with_tls(config),
+            protocol: self.protocol,
+            make_service: self.make_service,
+            executor: self.executor,
+            request: self.request,
         }
     }
 }

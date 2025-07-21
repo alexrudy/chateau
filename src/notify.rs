@@ -23,20 +23,23 @@ impl IntoFuture for Receiver {
     type Output = ();
 
     fn into_future(self) -> Self::IntoFuture {
-        Notified(Box::pin(async move {
+        Notified(Some(Box::pin(async move {
             self.0.closed().await;
-        }))
+        })))
     }
 }
 
-#[pin_project::pin_project]
-pub(crate) struct Notified(#[pin] BoxFuture<'static, ()>);
+pub(crate) struct Notified(Option<BoxFuture<'static, ()>>);
 
 impl Future for Notified {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Self::Output> {
-        self.project().0.poll(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Self::Output> {
+        self.0
+            .as_mut()
+            .map_or(std::task::Poll::Ready(()), |future| {
+                future.as_mut().poll(cx)
+            })
     }
 }
 

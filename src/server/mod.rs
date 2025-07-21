@@ -15,9 +15,17 @@ use crate::{notify, services::MakeServiceRef};
 pub use self::builder::{NeedsAcceptor, NeedsExecutor, NeedsProtocol, NeedsService};
 use self::conn::drivers::{ConnectionDriver, ServerExecutor};
 use self::conn::drivers::{GracefulConnectionDriver, GracefulServerExecutor};
-pub use self::conn::{Accept, Connection, Protocol};
+
+/// Trait for accepting new connections from raw streams.
+pub use self::conn::Accept;
+/// Trait for managing and driving a connection.
+pub use self::conn::Connection;
+/// Trait to convert IO streams into [`Connection`]s
+pub use self::conn::Protocol;
 
 mod builder;
+#[cfg(feature = "codec")]
+pub mod codec;
 pub mod conn;
 
 /// A server that can accept connections, and run each connection
@@ -70,10 +78,7 @@ impl Server<(), (), (), (), ()> {
 }
 
 impl<A, P, S, R, E> Server<A, P, S, R, E> {
-    /// Create a new server with the given `MakeService` and `Acceptor`, and a custom [Protocol].
-    ///
-    /// The default protocol is [AutoBuilder], which can serve both HTTP/1 and HTTP/2 connections,
-    /// and will automatically detect the protocol used by the client.
+    /// Create a new server with the given [`tower::make::MakeService`] and [`Accept`], and [`Protocol`].
     pub fn new(acceptor: A, protocol: P, make_service: S, executor: E) -> Self {
         Self {
             acceptor,

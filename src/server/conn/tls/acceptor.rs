@@ -1,10 +1,9 @@
 //! Hyper TLS Acceptor with some support for tracing.
 
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures_core::ready;
 use pin_project::pin_project;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -67,7 +66,7 @@ where
 /// Extension trait for the [Accept] trait to add a method to wrap the acceptor in a TLS acceptor.
 pub trait TlsAcceptExt: Accept {
     /// Wrap the acceptor in a TLS acceptor using the given [rustls::ServerConfig].
-    fn tls(self, config: Arc<ServerConfig>) -> TlsAcceptor<Self>
+    fn with_tls(self, config: Arc<ServerConfig>) -> TlsAcceptor<Self>
     where
         Self: Sized,
     {
