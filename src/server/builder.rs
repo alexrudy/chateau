@@ -1,5 +1,7 @@
+#[cfg(feature = "tls")]
 use std::sync::Arc;
 
+#[cfg(feature = "tls")]
 use rustls::ServerConfig;
 use tower::make::Shared;
 

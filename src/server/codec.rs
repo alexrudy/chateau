@@ -197,23 +197,21 @@ where
             *this.service_ready = true;
         }
 
-        loop {
-            match ready!(this.framed.as_mut().try_poll_next(cx)) {
-                Some(Ok(req)) => {
-                    let future = this.service.call(req);
-                    this.tasks.push(future);
-                    *this.service_ready = false;
-                    return Ok(ReadAction::Spawned).into();
-                }
+        match ready!(this.framed.as_mut().try_poll_next(cx)) {
+            Some(Ok(req)) => {
+                let future = this.service.call(req);
+                this.tasks.push(future);
+                *this.service_ready = false;
+                return Ok(ReadAction::Spawned).into();
+            }
 
-                Some(Err(error)) => {
-                    debug!("Codec Error");
-                    return Err(error).into();
-                }
-                None => {
-                    trace!("Codec Empty");
-                    return Ok(ReadAction::Terminated).into();
-                }
+            Some(Err(error)) => {
+                debug!("Codec Error");
+                return Err(error).into();
+            }
+            None => {
+                trace!("Codec Empty");
+                return Ok(ReadAction::Terminated).into();
             }
         }
     }
