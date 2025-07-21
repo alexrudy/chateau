@@ -220,6 +220,9 @@ where
 }
 
 /// A static address resolver always returns the same address
+/// and ignores the request.
+///
+/// This is useful for connecting with a single location.
 #[derive(Debug)]
 pub struct StaticResolver<A> {
     address: A,
