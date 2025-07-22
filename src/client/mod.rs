@@ -1,5 +1,6 @@
 //! Client implementations
 
+pub mod codec;
 pub mod conn;
 pub mod pool;
 
