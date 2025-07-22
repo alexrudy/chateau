@@ -693,7 +693,7 @@ where
 #[cfg(all(test, feature = "mock"))]
 mod tests {
 
-    use futures_util::FutureExt as _;
+    use futures::FutureExt as _;
     use static_assertions::assert_impl_all;
 
     use crate::client::conn::transport::mock::MockConnectionError;
@@ -848,7 +848,7 @@ mod tests {
             MockTransport::channel(rx).connector(MockRequest)
         ));
 
-        assert!(futures_util::poll!(&mut checkout_a).is_pending());
+        assert!(futures::poll!(&mut checkout_a).is_pending());
 
         let mut checkout_b = std::pin::pin!(pool.checkout(
             key.clone(),
@@ -856,9 +856,9 @@ mod tests {
             MockTransport::reusable().connector(MockRequest),
         ));
 
-        assert!(futures_util::poll!(&mut checkout_b).is_pending());
+        assert!(futures::poll!(&mut checkout_b).is_pending());
         assert!(tx.send(MockStream::reusable()).is_ok());
-        assert!(futures_util::poll!(&mut checkout_b).is_pending());
+        assert!(futures::poll!(&mut checkout_b).is_pending());
 
         let conn_a = checkout_a.await.unwrap();
         assert!(conn_a.is_open());

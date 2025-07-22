@@ -58,7 +58,6 @@ missing_debug_implementations = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 
 [features]
-codec = []
 default = ["client", "server", "duplex"]
 docs = []
 client = ["happy_eyeballs"]

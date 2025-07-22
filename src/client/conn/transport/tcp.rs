@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures_util::future::FutureExt as _;
+use futures::future::FutureExt as _;
 use thiserror::Error;
 use tokio::net::TcpSocket;
 use tokio::task::JoinError;
