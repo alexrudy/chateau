@@ -4,6 +4,8 @@ use std::{fmt, pin::Pin};
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "codec")]
+pub mod framed;
 #[cfg(feature = "happy_eyeballs")]
 pub(crate) mod happy_eyeballs;
 pub mod info;

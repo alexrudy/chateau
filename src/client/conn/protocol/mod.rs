@@ -7,6 +7,9 @@
 #[cfg(feature = "mock")]
 pub mod mock;
 
+#[cfg(feature = "codec")]
+pub mod framed;
+
 use std::future::Future;
 
 use tower::Service;
