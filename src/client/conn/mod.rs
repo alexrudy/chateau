@@ -40,6 +40,7 @@ pub mod connection;
 pub mod connector;
 pub mod dns;
 pub mod protocol;
+pub mod service;
 pub mod stream;
 pub mod transport;
 
