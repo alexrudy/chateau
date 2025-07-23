@@ -15,7 +15,7 @@ keywords = ["tcp", "tower", "client", "server", "async"]
 [dependencies]
 bytes = "1"
 futures = "0.3"
-parking_lot = { version = "0.12", features = ["arc_lock"] }
+parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 pin-project = { version = "1" }
 rustls-native-certs = { version = "0.8.1", optional = true }
 socket2 = { version = "0.5" }
@@ -63,7 +63,7 @@ docs = []
 client = ["happy_eyeballs"]
 server = []
 mock = []
-codec = []
+codec = ["tokio-util/codec"]
 duplex = []
 happy_eyeballs = ["tokio/time"]
 tls = ["dep:rustls-native-certs", "dep:rustls", "dep:tokio-rustls"]

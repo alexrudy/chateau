@@ -1,7 +1,5 @@
 //! Client implementations
 
-#[cfg(feature = "codec")]
-pub mod codec;
 pub mod conn;
 pub mod pool;
 
