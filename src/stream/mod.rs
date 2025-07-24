@@ -28,23 +28,10 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## UDP Connections
-//! ```rust,no_run
-//! use chateau::stream::udp::{UdpListener, UdpMessage};
-//! use tokio::net::UdpSocket;
-//!
-//! # async fn example() -> std::io::Result<()> {
-//! let socket = UdpSocket::bind("127.0.0.1:8080").await?;
-//! let listener = UdpListener::new(socket, 1024);
-//!
-//! // UDP listener provides connection-like semantics
-//! // for message-based protocol
-//! # Ok(())
-//! # }
-//! ```
 
+#[cfg(feature = "duplex")]
+pub mod duplex;
 pub mod tcp;
 #[cfg(feature = "tls")]
 pub mod tls;
-pub mod udp;
+pub mod unix;
