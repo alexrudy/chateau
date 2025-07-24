@@ -4,12 +4,12 @@ use std::marker::PhantomData;
 
 use crate::services::SharedService;
 
-use super::conn::{
-    Connection, Protocol, Transport,
-    connector::{ConnectionError, ConnectorLayer},
-    dns::{Resolver, StaticResolver},
-    service::ClientExecutorService,
-};
+use super::conn::connector::{ConnectionError, ConnectorLayer};
+use super::conn::dns::{Resolver, StaticResolver};
+use super::conn::service::ClientExecutorService;
+use super::conn::{Connection, Protocol, Transport};
+use super::pool::{Key, PoolableConnection, PoolableStream};
+use super::{ConnectionPoolLayer, PoolConfig};
 
 /// Sentinel indicating a client needs to pick a resolver.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +37,7 @@ pub struct ClientBuilder<D, T, P, R> {
 }
 
 impl ClientBuilder<NeedsResolver, NeedsTransport, NeedsProtocol, NeedsRequest> {
+    /// Create a new builder struct
     pub fn new() -> Self {
         ClientBuilder {
             resolver: NeedsResolver,
@@ -76,6 +77,7 @@ impl<T, P, R> ClientBuilder<NeedsResolver, T, P, R> {
 }
 
 impl<D, P, R> ClientBuilder<D, NeedsTransport, P, R> {
+    /// Set the selected transport
     pub fn with_transport<T>(self, transport: T) -> ClientBuilder<D, T, P, R> {
         ClientBuilder {
             resolver: self.resolver,
@@ -87,6 +89,7 @@ impl<D, P, R> ClientBuilder<D, NeedsTransport, P, R> {
 }
 
 impl<D, T, R> ClientBuilder<D, T, NeedsProtocol, R> {
+    /// Set the selected protocol
     pub fn with_protocol<P>(self, protocol: P) -> ClientBuilder<D, T, P, R> {
         ClientBuilder {
             resolver: self.resolver,
@@ -111,7 +114,7 @@ where
     R: Send + 'static,
 {
     /// Build a simple client service.
-    pub fn build(
+    pub fn build_service(
         self,
     ) -> SharedService<
         R,
@@ -130,6 +133,46 @@ where
                 self.transport,
                 self.protocol,
             ))
+            .service(ClientExecutorService::new())
+    }
+}
+
+impl<D, T, P, R> ClientBuilder<D, T, P, R>
+where
+    D: Resolver<R> + Clone + Send + Sync + 'static,
+    D::Address: Send + Sync + 'static,
+    D::Error: Send + 'static,
+    D::Future: Send + 'static,
+    T: Transport<D::Address> + Clone + Send + Sync + 'static,
+    T::Future: Send + 'static,
+    P: Protocol<T::IO, R> + Clone + Send + Sync + 'static,
+    P::Connection: PoolableConnection<R>,
+    <P as Protocol<T::IO, R>>::Future: Send + 'static,
+    T::IO: PoolableStream + Unpin + Send + Sync + 'static,
+    R: Send + 'static,
+{
+    /// Build a client service with connection pooling
+    pub fn build_with_pool<K>(self, config: PoolConfig) -> SharedService<
+        R,
+        <<P as Protocol<<T as Transport<<D as Resolver<R>>::Address>>::IO, R>>::Connection as Connection<R>>::Response,
+        ConnectionError<
+            <D as Resolver<R>>::Error,
+            <T as Transport<<D as Resolver<R>>::Address>>::Error,
+            <P as Protocol<<T as Transport<<D as Resolver<R>>::Address>>::IO, R>>::Error,
+            <<P as Protocol<<T as Transport<<D as Resolver<R>>::Address>>::IO, R>>::Connection as Connection<R>>::Error
+        >>
+    where K: Key<R> + Send + 'static,
+    {
+        tower::ServiceBuilder::new()
+            .layer(SharedService::layer())
+            .layer(
+                ConnectionPoolLayer::<_, _, _, _, K>::new(
+                    self.resolver,
+                    self.transport,
+                    self.protocol,
+                )
+                .with_pool(config),
+            )
             .service(ClientExecutorService::new())
     }
 }

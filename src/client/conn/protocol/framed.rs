@@ -32,6 +32,18 @@ pub trait Tagged {
     fn tag(&self) -> Self::Tag;
 }
 
+/// Impl provided for tuples sent to addressed connections (like UDP)
+impl<R, A> Tagged for (R, A)
+where
+    R: Tagged,
+{
+    type Tag = R::Tag;
+
+    fn tag(&self) -> Self::Tag {
+        self.0.tag()
+    }
+}
+
 /// A protocol based on a framing codec
 #[derive(Debug)]
 pub struct FramedProtocol<C, Req, Res> {
@@ -403,6 +415,7 @@ where
 enum Inflight<M> {
     Pending(Waker),
     Response(M),
+    Tombstone,
 }
 
 impl<M> Inflight<M> {
@@ -647,6 +660,7 @@ where
                 // We shouldn't allow two identically tagged responses to fire anyways.
                 panic!("Waker for response already received");
             }
+            Some(target @ Inflight::Tombstone) => *target = Inflight::Pending(waker.clone()),
             None => {
                 inbox.insert(tag, Inflight::Pending(waker.clone()));
             }
@@ -655,13 +669,16 @@ where
 
     fn check_inbox(&self, tag: &M::Tag) -> Option<M> {
         let mut inbox = self.items.lock();
-        match inbox.remove_entry(tag) {
-            Some((_, Inflight::Response(response))) => Some(response),
-            Some((tag, pending)) => {
-                inbox.insert(tag, pending);
-                None
+        match inbox.get_mut(tag) {
+            Some(inflight @ Inflight::Response(_)) => {
+                let Inflight::Response(response) = std::mem::replace(inflight, Inflight::Tombstone)
+                else {
+                    panic!("inflight changed");
+                };
+
+                Some(response)
             }
-            None => None,
+            _ => None,
         }
     }
 
@@ -672,6 +689,7 @@ where
             .filter_map(|inflight| match inflight {
                 Inflight::Pending(waker) => Some(waker),
                 Inflight::Response(_) => None,
+                Inflight::Tombstone => None,
             })
             .next()
             .map(|waker| waker.wake_by_ref());

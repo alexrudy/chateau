@@ -223,7 +223,7 @@ where
 /// and ignores the request.
 ///
 /// This is useful for connecting with a single location.
-#[derive(Debug)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StaticResolver<A> {
     address: A,
 }
