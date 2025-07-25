@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-use crate::client::conn::{connector::ConnectionError, dns::Resolver};
+use crate::client::conn::{ConnectionError, dns::Resolver};
 
 /// A layer to run a resolver first, and continue with a tuple
 /// of (request, address) for inner services, as well as stripping

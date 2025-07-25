@@ -6,9 +6,9 @@ use pin_project::pin_project;
 
 use crate::BoxError;
 use crate::client::conn::Connection;
+use crate::client::conn::ConnectionError;
 use crate::client::conn::Protocol;
 use crate::client::conn::Transport;
-use crate::client::conn::connector::ConnectionError;
 use crate::client::conn::dns::Resolver;
 use crate::client::pool;
 use crate::client::pool::Checkout;

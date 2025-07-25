@@ -44,6 +44,8 @@ pub mod service;
 pub mod stream;
 pub mod transport;
 
+use thiserror::Error;
+
 pub use self::connection::Connection;
 pub use self::connector::Connector;
 pub use self::protocol::Protocol;
@@ -51,3 +53,45 @@ pub use self::protocol::Protocol;
 pub use self::transport::TlsTransport;
 pub use self::transport::Transport;
 pub use self::transport::TransportExt;
+
+use super::pool::KeyError;
+
+/// Error that can occur during the connection and serving process.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ConnectionError<D, T, P, S> {
+    /// Error occurred during the address resolution
+    #[error("resolving address")]
+    Resolving(#[source] D),
+
+    /// Error occurred during the connection
+    #[error("creating connection")]
+    Connecting(#[source] T),
+
+    /// Error occurred during the handshake
+    #[error("handshaking connection")]
+    Handshaking(#[source] P),
+
+    /// Error occurred during the service
+    #[error("service: {0}")]
+    Service(#[source] S),
+
+    /// Connection can't even be attempted
+    #[error("connection closed")]
+    Unavailable,
+
+    /// Error returned when building a key
+    #[error("key error: {0}")]
+    Key(#[from] KeyError),
+}
+
+impl<D, T, P, S> From<connector::Error<D, T, P>> for ConnectionError<D, T, P, S> {
+    fn from(value: connector::Error<D, T, P>) -> Self {
+        match value {
+            connector::Error::Resolving(d) => ConnectionError::Resolving(d),
+            connector::Error::Connecting(t) => ConnectionError::Connecting(t),
+            connector::Error::Handshaking(p) => ConnectionError::Handshaking(p),
+            connector::Error::Unavailable => ConnectionError::Unavailable,
+        }
+    }
+}

@@ -153,3 +153,19 @@ where
         }
     }
 }
+
+impl<A, P, S, B, E> Server<A, P, S, B, E> {
+    /// Map the service to a new value.
+    pub fn map_service<F, U>(self, f: F) -> Server<A, P, U, B, E>
+    where
+        F: FnOnce(S) -> U,
+    {
+        Server {
+            acceptor: self.acceptor,
+            make_service: f(self.make_service),
+            protocol: self.protocol,
+            executor: self.executor,
+            request: self.request,
+        }
+    }
+}

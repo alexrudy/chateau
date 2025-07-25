@@ -1,5 +1,6 @@
 //! Client implementations
 
+pub mod builder;
 pub mod conn;
 pub mod pool;
 

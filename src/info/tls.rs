@@ -68,8 +68,8 @@ impl TlsConnectionInfo {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn validated(&mut self) {
+    /// Mark this TLS information as externally validated.
+    pub fn validated(&mut self) {
         self.validated_server_name = true;
     }
 }

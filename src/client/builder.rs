@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::services::SharedService;
 
-use super::conn::connector::{ConnectionError, ConnectorLayer};
+use super::conn::ConnectionError;
+use super::conn::connector::ConnectorLayer;
 use super::conn::dns::{Resolver, StaticResolver};
 use super::conn::service::ClientExecutorService;
 use super::conn::{Connection, Protocol, Transport};

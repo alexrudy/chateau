@@ -21,9 +21,9 @@ use std::task::ready;
 use pin_project::pin_project;
 use thiserror::Error;
 
+use crate::client::conn::ConnectionError;
 use crate::client::conn::Protocol;
 use crate::client::conn::Transport;
-use crate::client::pool::KeyError;
 use crate::info::ConnectionInfo;
 use crate::info::HasConnectionInfo;
 
@@ -90,46 +90,6 @@ pub enum Error<Resolver, Transport, Protocol> {
     /// Connection can't even be attempted
     #[error("connection closed")]
     Unavailable,
-}
-
-/// Error that can occur during the connection and serving process.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum ConnectionError<D, T, P, S> {
-    /// Error occurred during the address resolution
-    #[error("resolving address")]
-    Resolving(#[source] D),
-
-    /// Error occurred during the connection
-    #[error("creating connection")]
-    Connecting(#[source] T),
-
-    /// Error occurred during the handshake
-    #[error("handshaking connection")]
-    Handshaking(#[source] P),
-
-    /// Error occurred during the service
-    #[error("service: {0}")]
-    Service(#[source] S),
-
-    /// Connection can't even be attempted
-    #[error("connection closed")]
-    Unavailable,
-
-    /// Error returned when building a key
-    #[error("key error: {0}")]
-    Key(#[from] KeyError),
-}
-
-impl<D, T, P, S> From<Error<D, T, P>> for ConnectionError<D, T, P, S> {
-    fn from(value: Error<D, T, P>) -> Self {
-        match value {
-            Error::Resolving(d) => ConnectionError::Resolving(d),
-            Error::Connecting(t) => ConnectionError::Connecting(t),
-            Error::Handshaking(p) => ConnectionError::Handshaking(p),
-            Error::Unavailable => ConnectionError::Unavailable,
-        }
-    }
 }
 
 #[pin_project(project = ConnectorStateProjected)]
@@ -612,7 +572,7 @@ mod future {
 
     use pin_project::pin_project;
 
-    use super::ConnectionError;
+    use crate::client::conn::ConnectionError;
     use crate::client::conn::{Connection, Protocol, Transport, dns::Resolver};
 
     /// A future that resolves to an HTTP response.
