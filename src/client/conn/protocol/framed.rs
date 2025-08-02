@@ -61,6 +61,18 @@ impl<C, Req, Res> FramedProtocol<C, Req, Res> {
     }
 }
 
+impl<C, Req, Res> Clone for FramedProtocol<C, Req, Res>
+where
+    C: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            codec: self.codec.clone(),
+            messages: PhantomData,
+        }
+    }
+}
+
 impl<C, Req, Res, IO> tower::Service<IO> for FramedProtocol<C, Req, Res>
 where
     C: Decoder<Item = Res> + Encoder<Req, Error = <C as Decoder>::Error> + Clone + Send + 'static,
@@ -143,7 +155,7 @@ where
     ///
     /// The driver should be polled to make progress on the connection. If it is not polled,
     /// or it is dropped, the connection will resort to only making progress when a response
-    /// future is polled. For some connections (e.g. UDP), this might result in a backlog of
+    /// future is polled. For unordered connections (e.g. UDP), this might result in a backlog of
     /// responses in response buffer.
     pub fn driver(&self) -> ConnectionDriver<C, Req, Res> {
         ConnectionDriver::new(Arc::clone(&self.inner))
@@ -686,12 +698,11 @@ where
         let inbox = self.items.lock();
         inbox
             .values()
-            .filter_map(|inflight| match inflight {
+            .find_map(|inflight| match inflight {
                 Inflight::Pending(waker) => Some(waker),
                 Inflight::Response(_) => None,
                 Inflight::Tombstone => None,
             })
-            .next()
             .map(|waker| waker.wake_by_ref());
     }
 

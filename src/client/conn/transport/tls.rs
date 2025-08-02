@@ -17,6 +17,76 @@ pub trait TlsAddress {
     fn domain(&self) -> Option<&str>;
 }
 
+/// Wrapper around a transport which adds TLS encryption when connecting
+/// to a static hostname.
+#[derive(Debug, Clone)]
+pub struct StaticHostTlsTransport<T> {
+    transport: T,
+    config: Arc<TlsClientConfig>,
+    host: Box<str>,
+}
+
+impl<T> StaticHostTlsTransport<T> {
+    /// Create a new `TlsTransport`
+    pub fn new(transport: T, config: Arc<TlsClientConfig>, host: impl Into<Box<str>>) -> Self {
+        Self {
+            transport,
+            config,
+            host: host.into(),
+        }
+    }
+
+    /// Returns the inner transport and the TLS configuration.
+    pub fn into_parts(self) -> (T, Arc<TlsClientConfig>) {
+        (self.transport, self.config)
+    }
+
+    /// Returns a reference to the inner transport.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// Returns a mutable reference to the inner transport.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    /// Returns a reference to the TLS configuration.
+    pub fn config(&self) -> &Arc<TlsClientConfig> {
+        &self.config
+    }
+
+    /// Target hostnmae used for TLS connections on this transport
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+impl<T, A> tower::Service<A> for StaticHostTlsTransport<T>
+where
+    T: Transport<A>,
+    <T as Transport<A>>::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
+    A: Clone + Send + Unpin,
+{
+    type Response = TlsStream<T::IO>;
+    type Error = TlsConnectionError<T::Error>;
+    type Future = future::TlsConnectionFuture<T, A>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.transport
+            .poll_ready(cx)
+            .map_err(TlsConnectionError::Connection)
+    }
+
+    fn call(&mut self, req: A) -> Self::Future {
+        let config = self.config.clone();
+        let host = self.host.clone();
+        let future = self.transport.connect(req);
+
+        future::TlsConnectionFuture::new(future, config, host.into())
+    }
+}
+
 /// Transport via TLS
 #[derive(Debug, Clone)]
 pub struct TlsTransport<T> {

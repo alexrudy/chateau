@@ -15,7 +15,7 @@ use tower::Service;
 use self::oneshot::Oneshot;
 
 #[cfg(feature = "tls")]
-pub use self::tls::TlsTransport;
+pub use self::tls::{StaticHostTlsTransport, TlsTransport};
 #[cfg(feature = "tls")]
 use crate::client::default_tls_config;
 

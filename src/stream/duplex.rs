@@ -192,7 +192,7 @@ impl DuplexConnectionRequest {
 /// This can be treated as a stream:
 /// ```
 /// # use chateau::stream::duplex::{self, DuplexClient};
-/// use futures_util::TryStreamExt;
+/// use futures::TryStreamExt;
 /// # async fn demo_duplex() {
 /// let (client, mut incoming) = duplex::pair();
 ///
