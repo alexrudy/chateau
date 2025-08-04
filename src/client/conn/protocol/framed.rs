@@ -1,5 +1,45 @@
-//! Codec-basd clients which support multiplexed protocols
+//! Codec-basd clients which support multiplexed and pipelined protocols
 //!
+//! This protocol uses a [`Framed`] [sink][futures::Sink] and
+//! [stream][futures::Stream] to implement the driver for
+//! a [`tower::Service`]. Codecs can handle multiplexing or
+//! not (i.e. be pipelined), and usually they can be driven
+//! over any underlying IO system. HTTP/1 and HTTP/2 could both
+//! be implemented as Codecs, though [`hyper`] does not take
+//! this approach.
+//!
+//! # Integrating Codecs with [tower::Service]
+//!
+//! Codecs are a useful abstraction, but they don't necessarily fit
+//! well with the conventional model for tower Servers and Clients.
+//!
+//! This module provides a [FramedProtocol] and [FramedConnection]
+//! which cooperate with the other protocol and connection abstractions
+//! in this library to build clients. The [FramedProtocol] can
+//! be used with the client builder to create a tower-based Client
+//! which appropriately sets up the protocol, and sends requests via
+//! a transport on that protocol.
+//!
+//! # Multiplexing and tags
+//!
+//! The framed protocol here is designed for multiplexed protocols,
+//! where responses can be recieved in any order, not necessarily
+//! the order in which they were sent.
+//!
+//! As such, requests and responses must implement the [`Tagged`]
+//! trait, and return an identifier that can be used to match a
+//! request to a response.
+//!
+//! # Driving connections
+//!
+//! By default, connections only make progress processing requests and
+//! responses when at least one response future is polled. No request is sent
+//! until its response future is polled at least once. In cases where
+//! this might not happen (e.g. fire-and-forget requests, or requests sent,
+//! and then the task proceeds to do other work before polling for a response)
+//! it is important to have some task which is polling for responses and driving
+//! the connection forward. This can be done by getting a [ConnectionDriver]
+//! via the [`driver()`] method, and then spawning that driver onto a runtime.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};
@@ -12,7 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker, ready};
 
-use futures::{Sink, SinkExt, Stream, StreamExt as _, task::AtomicWaker};
+use futures::{Sink, SinkExt, Stream, StreamExt as _, task::AtomicWaker, task::noop_waker};
 use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Decoder, Encoder, Framed};
@@ -206,8 +246,18 @@ where
 
 /// Future returned by FramedProtocol to represent waiting for a response.
 ///
-/// This future must be awaited to send the request and receive the response, even
-/// if a connection driver is spawned in the background.
+/// This future must be used in some form to send the request and receive the response, even
+/// if a connection driver is spawned in the background. This is a consequence of three things:
+///
+/// 1. Rust futures do not do work until they are polled.
+/// 2. There is no internal queue to store messages. If you'd like to use a queue, consider
+/// the appropriate tower middleware.
+/// 3. Framed codecs must be polled to readiness to be ready to send a message. If the codec or underlying
+/// connection is still doing work from a previous message, a new message cannot be sent.
+///
+/// There is a heap-allocated queue which holds wakers for pending requests, but wakers
+/// are just a fat pointer, so the heap usage of this will not pile up, and the sending future retains control of the message
+/// memory.
 #[pin_project::pin_project(PinnedDrop)]
 #[must_use = "futures do nothing unless polled"]
 pub struct ResponseFuture<C, Req, Res>
@@ -246,6 +296,38 @@ where
     }
 }
 
+impl<C, Req, Res> ResponseFuture<C, Req, Res>
+where
+    Req: Tagged,
+    Res: Tagged<Tag = Req::Tag>,
+    C: Sink<Req> + Stream<Item = Result<Res, C::Error>>,
+    C::Error: From<io::Error>,
+{
+    /// Drive this future long enough to enqueue the request.
+    ///
+    /// This async method will drive the future far enough such that the request is sent to the codec for processing.
+    /// At this point, if a [`FramedConnection::driver`] is spawned on the runtime, it can take over driving the request-
+    /// response cycle. Without doing this, the request will never be sent (since Rust futures do not do any work until polled).
+    pub async fn enqueue(&mut self) -> Result<(), C::Error> {
+        std::future::poll_fn(|cx| Pin::new(&self.inner).poll_send(cx, &mut self.message)).await?;
+        Ok(())
+    }
+
+    /// Attempt to enqueue the request without yielding to the runtime.
+    ///
+    /// If this method returns Ok(false), then the message is *NOT* enqueued, and something must make progress
+    /// polling the underlying codec before this message will be sent. See the [`FramedConnection::driver`]
+    /// method for more info on driving the connection from another task.
+    pub fn try_enqueue_request(&mut self) -> Result<bool, C::Error> {
+        self.inner.try_send(&mut self.message)
+    }
+
+    /// Check if the request has already been sent to the codec for processing.
+    pub fn is_request_enqueued(&self) -> bool {
+        self.message.is_none()
+    }
+}
+
 impl<C, Req, Res> Future for ResponseFuture<C, Req, Res>
 where
     Req: Tagged,
@@ -259,45 +341,8 @@ where
         let mut this = self.project();
         let _span = tracing::trace_span!("response.poll", tag=?this.tag).entered();
         trace!("poll response");
-        if this.message.is_some() {
-            trace!("poll response send");
-            if !ready!(this.inner.poll_send(cx, &mut this.message))? {
-                trace!("poll send placed in queue");
-                // return Poll::Pending;
-            }
-        }
-        loop {
-            trace!("poll response check inbox");
-            if let Some(message) = this.inner.inbox.check_inbox(&this.tag) {
-                return Poll::Ready(Ok(message));
-            }
-
-            trace!("poll response recv");
-            match this.inner.poll_next(cx) {
-                Poll::Ready(Some(Ok(message))) => {
-                    let tag = message.tag();
-                    trace!(?tag, "Received message");
-                    this.inner.inbox.recieve(message);
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Ready(None) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "Connection closed",
-                    )
-                    .into()));
-                }
-                Poll::Pending => break,
-            }
-        }
-
-        match this.inner.poll_flush(cx) {
-            Poll::Ready(Ok(())) => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
+        ready!(this.inner.poll_request(cx, &mut this.message))?;
+        this.inner.poll_response(cx, &this.tag)
     }
 }
 
@@ -439,7 +484,7 @@ impl<M> Inflight<M> {
 #[pin_project::pin_project]
 struct SendQueue<M> {
     // Next message to send, plus a waker to let the sending
-    // task know it should be polled again.
+    // task know it should start polling for a response.
     pending: Option<(M, Waker)>,
 
     // Notify when a new spot opens up.
@@ -489,6 +534,41 @@ where
             Poll::Pending
         }
     }
+
+    /// Attempt to send the message immediately, without polling or waiting.
+    ///
+    /// When a driver is driving this protocol elsewhere, this can be used to enque a message.
+    fn try_send(&self, item: &mut Option<Req>) -> Result<bool, C::Error> {
+        if let Some(mut codec) = self.codec.try_lock() {
+            if !self.ready.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+
+            let message = item.take().expect("message stolen");
+            let tag = message.tag();
+            trace!(?tag, "start message send");
+            codec.start_send_unpin(message)?;
+            self.ready.store(false, Ordering::Release);
+            let mut send_queue = self.send_queue.lock();
+            if let Some(waker) = send_queue.queue.pop_front() {
+                // Notify another task which was waiting for the slot to send messages.
+                trace!("wake next in queue");
+                waker.wake();
+            }
+            return Ok(true);
+        } else {
+            let mut send_queue = self.send_queue.lock();
+            if send_queue.pending.is_some() {
+                return Ok(false);
+            }
+            let message = item.take().expect("message stolen");
+            let waker = noop_waker();
+            send_queue.pending = Some((message, waker));
+            self.notify.wake();
+            return Ok(true);
+        }
+    }
+
     fn poll_send(
         &self,
         cx: &mut Context<'_>,
@@ -551,7 +631,72 @@ where
             Poll::Pending
         }
     }
+}
 
+impl<C, Req, Res> InnerProtocol<C, Req, Res>
+where
+    Req: Tagged,
+    Res: Tagged<Tag = Req::Tag>,
+    C: Sink<Req> + Stream<Item = Result<Res, C::Error>>,
+    C::Error: From<io::Error>,
+{
+    fn poll_request(
+        &self,
+        cx: &mut Context<'_>,
+        message: &mut Option<Req>,
+    ) -> Poll<Result<(), C::Error>> {
+        if message.is_some() {
+            trace!("poll response send");
+            if !ready!(self.poll_send(cx, message))? {
+                trace!("poll send placed in queue");
+                return Poll::Pending;
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_response(&self, cx: &mut Context<'_>, tag: &Req::Tag) -> Poll<Result<Res, C::Error>> {
+        loop {
+            trace!("poll response check inbox");
+            if let Some(message) = self.inbox.check_inbox(tag) {
+                return Poll::Ready(Ok(message));
+            }
+
+            trace!("poll response recv");
+            match self.poll_next(cx) {
+                Poll::Ready(Some(Ok(message))) => {
+                    let tag = message.tag();
+                    trace!(?tag, "Received message");
+                    self.inbox.recieve(message);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "Connection closed",
+                    )
+                    .into()));
+                }
+                Poll::Pending => break,
+            }
+        }
+
+        match self.poll_flush(cx) {
+            Poll::Ready(Ok(())) => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<C, Req, Res> InnerProtocol<C, Req, Res>
+where
+    Req: Tagged,
+    Res: Tagged<Tag = Req::Tag>,
+    C: Sink<Req> + Stream<Item = Result<Res, C::Error>>,
+{
     fn poll_drive_connection(
         &self,
         cx: &mut Context<'_>,
