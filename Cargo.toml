@@ -13,7 +13,6 @@ categories = ["network-programming"]
 keywords = ["tcp", "tower", "client", "server", "async"]
 
 [dependencies]
-bytes = "1"
 futures = "0.3"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 pin-project = { version = "1" }
