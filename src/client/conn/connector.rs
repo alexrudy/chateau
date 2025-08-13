@@ -236,6 +236,7 @@ where
     T: Transport<D::Address>,
     P: Protocol<T::IO, R>,
 {
+    #[allow(clippy::type_complexity)]
     pub(in crate::client) fn poll_connector<F>(
         self: Pin<&mut Self>,
         notify: F,
@@ -552,7 +553,7 @@ where
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.transport
             .poll_ready(cx)
-            .map_err(|error| ConnectionError::Connecting(error))
+            .map_err(ConnectionError::Connecting)
     }
 
     fn call(&mut self, req: Req) -> Self::Future {
@@ -621,7 +622,7 @@ mod future {
             }
         }
 
-        #[allow(dead_code)]
+        #[allow(dead_code, clippy::type_complexity)]
         fn error(
             error: ConnectionError<
                 D::Error,
@@ -720,6 +721,7 @@ mod future {
             service: S,
         },
         ConnectionError(
+            #[allow(clippy::type_complexity)]
             Option<
                 ConnectionError<
                     D::Error,

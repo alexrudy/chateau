@@ -25,11 +25,13 @@ compile_error!(
     "The 'tls' feature requires a backend, enable 'tls-ring' or 'tls-aws-lc' to select a backend"
 );
 
+#[allow(dead_code)]
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+#[allow(dead_code)]
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Utility struct for formatting a `Display` type in a `Debug` context.
 #[allow(unused)]
+/// Utility struct for formatting a `Display` type in a `Debug` context.
 pub(crate) struct DebugLiteral<T: fmt::Display>(T);
 
 impl<T: fmt::Display> fmt::Debug for DebugLiteral<T> {

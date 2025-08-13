@@ -115,6 +115,7 @@ where
     R: Send + 'static,
 {
     /// Build a simple client service.
+    #[allow(clippy::type_complexity)]
     pub fn build_service(
         self,
     ) -> SharedService<
@@ -153,6 +154,7 @@ where
     R: Send + 'static,
 {
     /// Build a client service with connection pooling
+    #[allow(clippy::type_complexity)]
     pub fn build_with_pool<K>(self, config: PoolConfig) -> SharedService<
         R,
         <<P as Protocol<<T as Transport<<D as Resolver<R>>::Address>>::IO, R>>::Connection as Connection<R>>::Response,

@@ -153,6 +153,7 @@ where
     Waiting,
     Connected,
     Connecting(Pin<Box<Connector<D, T, P, R>>>),
+    #[allow(clippy::type_complexity)]
     ConnectingWithDelayDrop(Option<Pin<Box<Connector<D, T, P, R>>>>),
     ConnectingDelayed(Pin<Box<Connector<D, T, P, R>>>),
 }

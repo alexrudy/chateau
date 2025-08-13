@@ -310,6 +310,7 @@ where
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn error(
         error: ConnectionError<D::Error, T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>,
     ) -> Self {
@@ -333,6 +334,7 @@ where
     S: tower::Service<(Pooled<C, R>, R), Response = C::Response> + Send + 'static,
     R: Send,
 {
+    #[allow(clippy::type_complexity)]
     type Output = Result<
         C::Response,
         ConnectionError<D::Error, T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>,
@@ -371,7 +373,7 @@ where
                     }
                 },
                 ResponseFutureStateProj::ConnectionError(error) => {
-                    return Poll::Ready(Err(error.take().expect("error polled again").into()));
+                    return Poll::Ready(Err(error.take().expect("error polled again")));
                 }
             };
             this.inner.set(next);
@@ -397,6 +399,8 @@ where
         checkout: Checkout<D, T, P, R>,
         service: S,
     },
+
+    #[allow(clippy::type_complexity)]
     ConnectionError(
         Option<ConnectionError<D::Error, T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>>,
     ),

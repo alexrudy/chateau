@@ -104,8 +104,6 @@ impl tower::Service<SocketAddrs> for TcpTransport {
                     trace!("tcp connected");
                 }
 
-                let stream = stream.into();
-
                 Ok(stream)
             }
             .instrument(span),
@@ -431,8 +429,6 @@ impl tower::Service<SocketAddr> for SimpleTcpTransport {
                 trace!("no peer address available");
             }
 
-            let stream = stream.into();
-
             Ok(stream)
         }
         .instrument(span)
@@ -561,13 +557,10 @@ mod test {
         T: Service<R, Response = TcpStream>,
         <T as Service<R>>::Error: std::fmt::Debug,
     {
-        tokio::join!(
-            async { transport.oneshot(addr.into()).await.unwrap() },
-            async {
-                let (stream, addr) = listener.accept().await.unwrap();
-                TcpStream::server(stream, addr)
-            }
-        )
+        tokio::join!(async { transport.oneshot(addr).await.unwrap() }, async {
+            let (stream, addr) = listener.accept().await.unwrap();
+            TcpStream::server(stream, addr)
+        })
     }
 
     #[tokio::test]

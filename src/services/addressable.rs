@@ -61,10 +61,10 @@ where
     type Future = ResolvedAddressableFuture<D, S, R, U>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        ready!(self.resolver.poll_ready(cx)).map_err(|error| ConnectionError::Resolving(error))?;
+        ready!(self.resolver.poll_ready(cx)).map_err(ConnectionError::Resolving)?;
         self.service
             .poll_ready(cx)
-            .map_err(|error| ConnectionError::Service(error))
+            .map_err(ConnectionError::Service)
     }
 
     fn call(&mut self, req: R) -> Self::Future {
@@ -166,8 +166,7 @@ where
                     service,
                     request,
                 } => {
-                    let address = ready!(resolver.poll(cx))
-                        .map_err(|error| ConnectionError::Resolving(error))?;
+                    let address = ready!(resolver.poll(cx)).map_err(ConnectionError::Resolving)?;
                     let request = request.take().expect("request stolen before ready");
                     let future = service.call((request, address));
                     this.state.as_mut().set(State::Serving { service: future });
