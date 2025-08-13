@@ -1,7 +1,5 @@
 //! Duplex transport for patron clients
 
-#![cfg(feature = "duplex")]
-
 use std::io;
 use std::task::{Context, Poll};
 
@@ -49,8 +47,8 @@ impl tower::Service<DuplexAddr> for DuplexTransport {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(test, feature = "server"))]
+mod test_roundtrip {
 
     use super::*;
     use crate::client::conn::transport::TransportExt as _;

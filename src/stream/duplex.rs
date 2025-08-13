@@ -1,4 +1,3 @@
-#![cfg(feature = "duplex")]
 //! A duplex stream suitable for a transport mechanism.
 //!
 //! This isn't just a plain-old stream, becasue we need to support

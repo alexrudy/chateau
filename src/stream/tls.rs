@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 pub use crate::info::TlsConnectionInfo;
+#[cfg(feature = "server")]
 use crate::info::tls::TlsConnectionInfoReceiver;
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -76,6 +77,7 @@ pub trait TlsHandshakeStream {
     }
 }
 
+#[cfg(feature = "server")]
 /// A stream which can provide information about the TLS handshake.
 pub(crate) trait TlsHandshakeInfo: TlsHandshakeStream {
     fn recv(&self) -> TlsConnectionInfoReceiver;
@@ -112,6 +114,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<Tls, NoTls> TlsHandshakeInfo for OptTlsStream<Tls, NoTls>
 where
     Tls: TlsHandshakeInfo + Unpin,

@@ -4,7 +4,10 @@
 
 use super::HasConnectionInfo;
 
-pub(crate) use self::channel::{TlsConnectionInfoReceiver, TlsConnectionInfoSender, channel};
+#[cfg(feature = "server")]
+pub(crate) use self::channel::TlsConnectionInfoReceiver;
+#[cfg(feature = "server")]
+pub(crate) use self::channel::{TlsConnectionInfoSender, channel};
 
 /// Information about a TLS connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -83,6 +86,7 @@ pub trait HasTlsConnectionInfo: HasConnectionInfo {
     fn tls_info(&self) -> Option<&TlsConnectionInfo>;
 }
 
+#[cfg(feature = "server")]
 mod channel {
     use std::{
         ops::{Deref, DerefMut},
