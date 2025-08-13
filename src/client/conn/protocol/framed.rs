@@ -338,11 +338,11 @@ where
     type Output = Result<Res, C::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
+        let this = self.project();
         let _span = tracing::trace_span!("response.poll", tag=?this.tag).entered();
         trace!("poll response");
-        ready!(this.inner.poll_request(cx, &mut this.message))?;
-        this.inner.poll_response(cx, &this.tag)
+        ready!(this.inner.poll_request(cx, this.message))?;
+        this.inner.poll_response(cx, this.tag)
     }
 }
 
@@ -555,7 +555,7 @@ where
                 trace!("wake next in queue");
                 waker.wake();
             }
-            return Ok(true);
+            Ok(true)
         } else {
             let mut send_queue = self.send_queue.lock();
             if send_queue.pending.is_some() {
@@ -565,7 +565,7 @@ where
             let waker = noop_waker();
             send_queue.pending = Some((message, waker));
             self.notify.wake();
-            return Ok(true);
+            Ok(true)
         }
     }
 
@@ -614,7 +614,7 @@ where
 
     fn poll_next(&self, cx: &mut Context<'_>) -> Poll<Option<Result<Res, C::Error>>> {
         if let Some(mut codec) = self.codec.try_lock() {
-            (&mut *codec).poll_next_unpin(cx)
+            (*codec).poll_next_unpin(cx)
         } else {
             Poll::Pending
         }
@@ -622,7 +622,7 @@ where
 
     fn poll_flush(&self, cx: &mut Context<'_>) -> Poll<Result<(), C::Error>> {
         if let Some(mut codec) = self.codec.try_lock() {
-            match (&mut *codec).poll_flush_unpin(cx) {
+            match (*codec).poll_flush_unpin(cx) {
                 Poll::Ready(Ok(())) => Poll::Pending,
                 Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 Poll::Pending => Poll::Pending,
@@ -841,14 +841,13 @@ where
 
     fn wake_one(&self) {
         let inbox = self.items.lock();
-        inbox
-            .values()
-            .find_map(|inflight| match inflight {
-                Inflight::Pending(waker) => Some(waker),
-                Inflight::Response(_) => None,
-                Inflight::Tombstone => None,
-            })
-            .map(|waker| waker.wake_by_ref());
+        if let Some(waker) = inbox.values().find_map(|inflight| match inflight {
+            Inflight::Pending(waker) => Some(waker),
+            Inflight::Response(_) => None,
+            Inflight::Tombstone => None,
+        }) {
+            waker.wake_by_ref();
+        }
     }
 
     fn remove(&self, tag: &M::Tag) {
