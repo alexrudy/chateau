@@ -5,7 +5,7 @@
 //! a [`tower::Service`]. Codecs can handle multiplexing or
 //! not (i.e. be pipelined), and usually they can be driven
 //! over any underlying IO system. HTTP/1 and HTTP/2 could both
-//! be implemented as Codecs, though [`hyper`] does not take
+//! be implemented as Codecs, though `hyper` does not take
 //! this approach.
 //!
 //! # Integrating Codecs with [tower::Service]
@@ -39,7 +39,7 @@
 //! of requests that will be simultaneously polled, other than the
 //! heap size availalbe to the program. Therefore, it is important
 //! to provide some other concurrency-limiting middleware, like
-//! [tower::limit::ConcurrencyLimitLayer] to set the maximum number
+//! `tower::limit::concurrency::ConcurrencyLimitLayer` to set the maximum number
 //! of simultaneously processed requests.
 
 use std::fmt;

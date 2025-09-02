@@ -5,7 +5,7 @@
 //! a [`tower::Service`]. Codecs can handle multiplexing or
 //! not (i.e. be pipelined), and usually they can be driven
 //! over any underlying IO system. HTTP/1 and HTTP/2 could both
-//! be implemented as Codecs, though [`hyper`] does not take
+//! be implemented as Codecs, though `hyper` does not take
 //! this approach.
 //!
 //! # Integrating Codecs with [tower::Service]
@@ -39,7 +39,7 @@
 //! and then the task proceeds to do other work before polling for a response)
 //! it is important to have some task which is polling for responses and driving
 //! the connection forward. This can be done by getting a [ConnectionDriver]
-//! via the [`driver()`] method, and then spawning that driver onto a runtime.
+//! via the [`driver`](FramedConnection::driver) method, and then spawning that driver onto a runtime.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};

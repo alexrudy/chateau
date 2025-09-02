@@ -8,7 +8,6 @@
 //!
 //! - [`tcp`] - TCP stream wrapper with improved address semantics for servers
 //! - [`tls`] - TLS handshake support and optional TLS stream dispatching
-//! - [`udp`] - UDP message-based abstractions compatible with tower services
 //!
 //! # Examples
 //!

@@ -118,10 +118,10 @@ where
 /// A service which gets a connection from a possible connection pool and passes it to
 /// an inner service to execute that request.
 ///
-/// This service will accept [`http::Request`] objects, but expects the inner service
-/// to accept [`ExecuteRequest`] objects, which bundle the connection with the request.
+/// This service will accept request objects, but expects the inner service
+/// to accept request objects bundled with the connection.
 ///
-/// The simplest interior service is [`crate::service::RequestExecutor`], which will execute the request
+/// The inner service should execute the request
 /// on the connection and return the response.
 #[derive(Debug)]
 pub struct ConnectionPoolService<D, T, P, S, R, K>
