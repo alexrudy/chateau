@@ -16,7 +16,7 @@ use crate::server::conn::Accept;
 ///
 /// The actual handshake is handled in the [super::TlsStream] type.
 ///
-/// The TLS acceptor implements the [Accept] trait from hyperdriver.
+/// The TLS acceptor implements the [Accept] trait.
 #[derive(Debug)]
 #[pin_project]
 pub struct TlsAcceptor<A> {

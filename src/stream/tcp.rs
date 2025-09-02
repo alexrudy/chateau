@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio::net::TcpListener;
 
 use crate::info::HasConnectionInfo;
+#[cfg(feature = "server")]
 use crate::server::Accept;
 
 /// Canonicalize a socket address, converting IPv4-mapped IPv6 addresses
@@ -57,6 +58,15 @@ impl fmt::Debug for TcpStream {
 }
 
 impl TcpStream {
+    /// Connect to an address as a client stream
+    pub async fn connect(addr: SocketAddr) -> std::io::Result<Self> {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        Ok(Self {
+            stream,
+            remote: Some(addr),
+        })
+    }
+
     /// Create a new `TcpStream` from an existing `tokio::net::TcpStream` for a client
     /// connection. Client connections should have valid `peer_addr` and `local_addr`.
     ///
@@ -209,6 +219,7 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+#[cfg(feature = "server")]
 impl Accept for TcpListener {
     type Connection = TcpStream;
     type Error = io::Error;

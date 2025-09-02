@@ -1,7 +1,46 @@
 //! Codec-backed server protocol
 //!
-//! This protocol uses a [`Framed`] sink and stream to implement the driver for
-//! a [`tower::Service`].
+//! This protocol uses a [`Framed`] [sink][futures::Sink] and
+//! [stream][futures::Stream] to implement the driver for
+//! a [`tower::Service`]. Codecs can handle multiplexing or
+//! not (i.e. be pipelined), and usually they can be driven
+//! over any underlying IO system. HTTP/1 and HTTP/2 could both
+//! be implemented as Codecs, though `hyper` does not take
+//! this approach.
+//!
+//! # Integrating Codecs with [tower::Service]
+//!
+//! Codecs are a useful abstraction, but they don't necessarily fit
+//! well with the conventional model for tower Servers and Clients.
+//!
+//! This module provides a [FramedProtocol] and [FramedConnection]
+//! which cooperate with the other protocol and connection abstractions
+//! in this library to build services. The [FramedProtocol] can
+//! be used with the server builder to create a tower-based Server
+//! which appropriately sets up the protocol, drives the inner service
+//! to readiness, and uses it to respond to requests.
+//!
+//! # Multiplexing vs. Pipelining
+//!
+//! Codecs can be multiplexed or pipelined.
+//!
+//! A multiplexed codec is one where responses may come in any order,
+//! and multiple request response pairs can be handled simultaneously.
+//! HTTP/2 is an example of a multiplexed [Codec][tokio_util::codec].
+//!
+//! A pipelined codec in contrast handles requests in the order that
+//! they arrive, and so yields responses in the order that they were
+//! requested. Pipelined codecs may still support sending multiple
+//! requests over the wire, but they will be handled and returned
+//! one-by-one.
+//!
+//! In either case, all available requests will be polled as futures
+//! to make progress. This protocol does set any limit on the number
+//! of requests that will be simultaneously polled, other than the
+//! heap size availalbe to the program. Therefore, it is important
+//! to provide some other concurrency-limiting middleware, like
+//! `tower::limit::concurrency::ConcurrencyLimitLayer` to set the maximum number
+//! of simultaneously processed requests.
 
 use std::fmt;
 use std::pin::Pin;
@@ -17,6 +56,8 @@ use tracing::{debug, trace, warn};
 use super::{Connection, Protocol};
 
 /// A protocol for serving framed, codec-based services.
+///
+/// The generic parameter C is for the Framed codec.
 #[derive(Debug, Clone)]
 pub struct FramedProtocol<C> {
     codec: C,
