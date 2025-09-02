@@ -1,9 +1,5 @@
 //! Connections are responsible for sending and receiving HTTP requests and responses
 //! over an arbitrary two-way stream of bytes.
-//!
-//! The connection trait is implemented for [`hyper::client::conn::http1::SendRequest`] and
-//! [`hyper::client::conn::http2::SendRequest`], allowing the native hyper types to be used
-//! for [`Protocol`](super::Protocol).
 
 use std::future::Future;
 use std::pin::Pin;

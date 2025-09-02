@@ -17,7 +17,7 @@ pub struct MockRequest;
 pub struct MockResponse;
 
 /// Fake error
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 #[error("mock error")]
 pub struct MockError;
 
@@ -137,6 +137,7 @@ impl tower::Service<MockStream> for MockProtocol {
 #[cfg(test)]
 mod tests {
     use crate::client::conn::Protocol;
+    use std::task::{Context, Poll};
 
     use super::*;
 
@@ -144,4 +145,177 @@ mod tests {
 
     assert_impl_all!(MockSender: Connection<MockRequest>, PoolableConnection<MockRequest>);
     assert_impl_all!(MockProtocol: Protocol<MockStream, MockRequest>);
+    assert_impl_all!(MockRequest: Send, Sync);
+    assert_impl_all!(MockResponse: Send, Sync);
+    assert_impl_all!(MockError: std::error::Error, Send, Sync);
+    assert_impl_all!(MockProtocolError: std::error::Error, Send, Sync);
+
+    #[test]
+    fn test_mock_sender_new() {
+        let sender = MockSender::new();
+        assert!(sender.stream.can_share());
+        assert!(sender.stream.is_open());
+    }
+
+    #[test]
+    fn test_mock_sender_single() {
+        let sender = MockSender::single();
+        assert!(!sender.stream.can_share());
+        assert!(sender.stream.is_open());
+    }
+
+    #[test]
+    fn test_mock_sender_reusable() {
+        let sender = MockSender::reusable();
+        assert!(sender.stream.can_share());
+        assert!(sender.stream.is_open());
+    }
+
+    #[test]
+    fn test_mock_sender_default() {
+        let sender = MockSender::default();
+        assert!(sender.stream.can_share());
+        assert!(sender.stream.is_open());
+    }
+
+    #[test]
+    fn test_mock_sender_id() {
+        let sender1 = MockSender::new();
+        let sender2 = MockSender::new();
+
+        assert_ne!(sender1.id(), sender2.id());
+    }
+
+    #[test]
+    fn test_mock_sender_close() {
+        let sender = MockSender::new();
+        assert!(sender.stream.is_open());
+
+        sender.close();
+        assert!(!sender.stream.is_open());
+    }
+
+    #[test]
+    fn test_mock_sender_clone() {
+        let sender1 = MockSender::new();
+        let sender2 = sender1.clone();
+
+        assert_eq!(sender1.id(), sender2.id());
+    }
+
+    #[tokio::test]
+    async fn test_mock_sender_send_request() {
+        let mut sender = MockSender::new();
+        let request = MockRequest;
+
+        let future = sender.send_request(request);
+        let result = future.await;
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_sender_poll_ready() {
+        let mut sender = MockSender::new();
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let result = sender.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn test_mock_sender_poolable_connection() {
+        let mut sender = MockSender::reusable();
+
+        assert!(sender.is_open());
+        assert!(sender.can_share());
+
+        let reused = sender.reuse();
+        assert!(reused.is_some());
+
+        let cloned = reused.unwrap();
+        assert_eq!(sender.id(), cloned.id());
+    }
+
+    #[test]
+    fn test_mock_sender_poolable_connection_single() {
+        let mut sender = MockSender::single();
+
+        assert!(sender.is_open());
+        assert!(!sender.can_share());
+
+        let reused = sender.reuse();
+        assert!(reused.is_some());
+    }
+
+    #[test]
+    fn test_mock_protocol_default() {
+        let protocol = MockProtocol::default();
+        let debug_str = format!("{protocol:?}");
+        assert!(debug_str.contains("MockProtocol"));
+    }
+
+    #[test]
+    fn test_mock_protocol_clone() {
+        let protocol1 = MockProtocol::default();
+        let protocol2 = protocol1.clone();
+
+        assert_eq!(protocol1, protocol2);
+    }
+
+    #[tokio::test]
+    async fn test_mock_protocol_service() {
+        use tower::Service;
+
+        let mut protocol = MockProtocol::default();
+        let stream = MockStream::new(true);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll_result = tower::Service::poll_ready(&mut protocol, &mut cx);
+        assert!(matches!(poll_result, Poll::Ready(Ok(()))));
+
+        let future = protocol.call(stream);
+        let result = future.await;
+
+        assert!(result.is_ok());
+        let sender = result.unwrap();
+        assert!(sender.stream.can_share());
+    }
+
+    #[test]
+    fn test_mock_error() {
+        let error = MockError;
+        let error_str = format!("{error}");
+        assert_eq!(error_str, "mock error");
+
+        let debug_str = format!("{error:?}");
+        assert!(debug_str.contains("MockError"));
+    }
+
+    #[test]
+    fn test_mock_protocol_error() {
+        let error = MockProtocolError::default();
+        let error_str = format!("{error}");
+        assert_eq!(error_str, "mock protocol error");
+
+        let debug_str = format!("{error:?}");
+        assert!(debug_str.contains("MockProtocolError"));
+    }
+
+    #[test]
+    fn test_mock_request_debug() {
+        let request = MockRequest;
+        let debug_str = format!("{request:?}");
+        assert!(debug_str.contains("MockRequest"));
+    }
+
+    #[test]
+    fn test_mock_response_debug() {
+        let response = MockResponse;
+        let debug_str = format!("{response:?}");
+        assert!(debug_str.contains("MockResponse"));
+    }
 }

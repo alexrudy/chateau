@@ -876,3 +876,310 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{Sink, Stream};
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    use static_assertions::assert_impl_all;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct TestTag(u32);
+
+    #[derive(Debug, Clone)]
+    struct TestRequest {
+        id: u32,
+        #[allow(dead_code)]
+        data: String,
+    }
+
+    impl Tagged for TestRequest {
+        type Tag = TestTag;
+        fn tag(&self) -> Self::Tag {
+            TestTag(self.id)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestResponse {
+        id: u32,
+        result: String,
+    }
+
+    impl Tagged for TestResponse {
+        type Tag = TestTag;
+        fn tag(&self) -> Self::Tag {
+            TestTag(self.id)
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockCodec {
+        requests: VecDeque<TestRequest>,
+        responses: VecDeque<Result<TestResponse, io::Error>>,
+        ready: bool,
+    }
+
+    impl Clone for MockCodec {
+        fn clone(&self) -> Self {
+            Self {
+                requests: VecDeque::new(),
+                responses: VecDeque::new(),
+                ready: self.ready,
+            }
+        }
+    }
+
+    impl MockCodec {
+        fn new() -> Self {
+            Self {
+                requests: VecDeque::new(),
+                responses: VecDeque::new(),
+                ready: true,
+            }
+        }
+
+        #[allow(dead_code)]
+        fn add_response(&mut self, response: TestResponse) {
+            self.responses.push_back(Ok(response));
+        }
+    }
+
+    impl Sink<TestRequest> for MockCodec {
+        type Error = io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: TestRequest) -> Result<(), Self::Error> {
+            self.requests.push_back(item);
+            self.ready = false;
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.ready = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for MockCodec {
+        type Item = Result<TestResponse, io::Error>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(response) = self.responses.pop_front() {
+                Poll::Ready(Some(response))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Unpin for MockCodec {}
+
+    assert_impl_all!(TestTag: Eq, Clone, Debug, Hash);
+    assert_impl_all!(TestRequest: Tagged);
+    assert_impl_all!(TestResponse: Tagged);
+    assert_impl_all!(FramedProtocol<MockCodec, TestRequest, TestResponse>: Send, Sync, Clone);
+
+    #[test]
+    fn test_tagged_trait() {
+        let request = TestRequest {
+            id: 42,
+            data: "test".to_string(),
+        };
+        assert_eq!(request.tag(), TestTag(42));
+
+        let response = TestResponse {
+            id: 42,
+            result: "success".to_string(),
+        };
+        assert_eq!(response.tag(), TestTag(42));
+    }
+
+    #[test]
+    fn test_tagged_tuple() {
+        let request = TestRequest {
+            id: 1,
+            data: "test".to_string(),
+        };
+        let addr = "127.0.0.1:8080";
+        let tuple = (request.clone(), addr);
+
+        assert_eq!(tuple.tag(), TestTag(1));
+    }
+
+    #[test]
+    fn test_framed_protocol_new() {
+        let codec = MockCodec::new();
+        let protocol = FramedProtocol::<_, TestRequest, TestResponse>::new(codec);
+
+        let debug_str = format!("{protocol:?}");
+        assert!(debug_str.contains("FramedProtocol"));
+    }
+
+    #[test]
+    fn test_framed_protocol_clone() {
+        let codec = MockCodec::new();
+        let protocol = FramedProtocol::<_, TestRequest, TestResponse>::new(codec);
+        let cloned = protocol.clone();
+
+        let debug1 = format!("{protocol:?}");
+        let debug2 = format!("{cloned:?}");
+        assert_eq!(debug1, debug2);
+    }
+
+    #[test]
+    fn test_framed_connection_new() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+
+        let debug_str = format!("{connection:?}");
+        assert!(debug_str.contains("FramedProtocol"));
+    }
+
+    #[test]
+    fn test_framed_connection_clone() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+        let cloned = connection.clone();
+
+        let debug1 = format!("{connection:?}");
+        let debug2 = format!("{cloned:?}");
+        assert_eq!(debug1, debug2);
+    }
+
+    #[test]
+    fn test_response_future_debug() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+
+        let request = TestRequest {
+            id: 1,
+            data: "test".to_string(),
+        };
+
+        let future = connection.send(request);
+        let debug_str = format!("{future:?}");
+
+        assert!(debug_str.contains("ResponseFuture"));
+        assert!(debug_str.contains("tag"));
+    }
+
+    #[test]
+    fn test_connection_driver_debug() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+
+        let driver = connection.driver();
+        let debug_str = format!("{driver:?}");
+
+        assert!(debug_str.contains("ConnectionDriver"));
+    }
+
+    #[test]
+    fn test_connection_driver_future_debug() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+
+        let driver = connection.driver();
+        let future = driver.into_future();
+        let debug_str = format!("{future:?}");
+
+        assert!(debug_str.contains("ConnectionDriverFuture"));
+    }
+
+    #[test]
+    fn test_inbox_operations() {
+        let inbox: Inbox<TestResponse> = Inbox::new();
+        let tag = TestTag(1);
+
+        let waker = Waker::noop();
+        inbox.pending_response(tag.clone(), waker);
+
+        assert!(inbox.check_inbox(&tag).is_none());
+
+        let response = TestResponse {
+            id: 1,
+            result: "test".to_string(),
+        };
+
+        inbox.recieve(response.clone());
+
+        let received = inbox.check_inbox(&tag);
+        assert!(received.is_some());
+        assert_eq!(received.unwrap().result, "test");
+
+        assert!(inbox.check_inbox(&tag).is_none());
+    }
+
+    #[test]
+    fn test_inbox_remove() {
+        let inbox: Inbox<TestResponse> = Inbox::new();
+        let tag = TestTag(1);
+
+        let waker = Waker::noop();
+        inbox.pending_response(tag.clone(), waker);
+
+        inbox.remove(&tag);
+
+        assert!(inbox.check_inbox(&tag).is_none());
+    }
+
+    #[test]
+    fn test_inbox_wake_one() {
+        let inbox: Inbox<TestResponse> = Inbox::new();
+        inbox.wake_one();
+    }
+
+    #[test]
+    fn test_inflight_is_pending() {
+        let waker = Waker::noop();
+        let pending = Inflight::<TestResponse>::Pending(waker.clone());
+        assert!(pending.is_pending());
+
+        let response = TestResponse {
+            id: 1,
+            result: "test".to_string(),
+        };
+        let response_inflight = Inflight::Response(response);
+        assert!(!response_inflight.is_pending());
+
+        let tombstone = Inflight::<TestResponse>::Tombstone;
+        assert!(!tombstone.is_pending());
+    }
+
+    #[test]
+    fn test_response_future_enqueue_methods() {
+        let codec = MockCodec::new();
+        let connection = FramedConnection::<_, TestRequest, TestResponse>::new(codec);
+
+        let request = TestRequest {
+            id: 1,
+            data: "test".to_string(),
+        };
+
+        let mut future = connection.send(request);
+
+        assert!(!future.is_request_enqueued());
+
+        let result = future.try_enqueue_request();
+        assert!(result.is_ok());
+    }
+}

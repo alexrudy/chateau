@@ -20,7 +20,7 @@ use crate::info::HasConnectionInfo;
 
 /// Protocols (like HTTP) define how data is sent and received over a connection.
 ///
-/// A protocol is a service which accepts a [`ProtocolRequest`] and returns a connection.
+/// A protocol is a service which accepts a Stream and returns a connection.
 ///
 /// The request contains a transport stream and the HTTP protocol to use for the connection.
 ///
@@ -81,5 +81,95 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), <Self as Protocol<IO, Req>>::Error>> {
         Service::poll_ready(self, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::{Ready, ready};
+    use std::task::{Context, Poll};
+
+    use static_assertions::assert_impl_all;
+
+    #[derive(Debug)]
+    struct TestRequest;
+
+    #[derive(Debug, Clone)]
+    struct TestConnection;
+
+    impl Connection<TestRequest> for TestConnection {
+        type Response = String;
+        type Error = std::io::Error;
+        type Future = Ready<Result<String, std::io::Error>>;
+
+        fn send_request(&mut self, _request: TestRequest) -> Self::Future {
+            ready(Ok("response".to_string()))
+        }
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestIO {
+        #[allow(dead_code)]
+        data: String,
+    }
+
+    impl crate::info::HasConnectionInfo for TestIO {
+        type Addr = std::net::SocketAddr;
+
+        fn info(&self) -> crate::info::ConnectionInfo<Self::Addr> {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
+            crate::info::ConnectionInfo {
+                local_addr: addr,
+                remote_addr: addr,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestProtocol;
+
+    impl tower::Service<TestIO> for TestProtocol {
+        type Response = TestConnection;
+        type Error = std::io::Error;
+        type Future = Ready<Result<TestConnection, std::io::Error>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: TestIO) -> Self::Future {
+            ready(Ok(TestConnection))
+        }
+    }
+
+    assert_impl_all!(TestProtocol: Protocol<TestIO, TestRequest>);
+
+    #[test]
+    fn test_protocol_blanket_implementation() {
+        let mut protocol = TestProtocol;
+        let io = TestIO {
+            data: "test".to_string(),
+        };
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll_result = Protocol::<TestIO, TestRequest>::poll_ready(&mut protocol, &mut cx);
+        assert!(matches!(poll_result, Poll::Ready(Ok(()))));
+
+        let future = protocol.connect(io);
+        let connection = futures::executor::block_on(future);
+        assert!(connection.is_ok());
+    }
+
+    #[test]
+    fn test_protocol_multiplex_default() {
+        let protocol = TestProtocol;
+        assert!(!protocol.multiplex());
     }
 }

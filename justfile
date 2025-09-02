@@ -2,7 +2,7 @@
 
 
 nightly := "nightly-2025-06-20"
-msrv := "1.76"
+msrv := "1.87"
 rust := env("RUSTUP_TOOLCHAIN", "stable")
 feature-set := "mock,tls-ring,server,client,duplex"
 extended-features := "mock,tls,tls-ring"
@@ -120,6 +120,9 @@ deny:
 # Run fmt checks
 fmt:
     cargo +{{rust}} fmt --all --check
+
+fmt-run:
+    cargo +{{rust}} fmt --all
 
 # Run pre-commit checks
 pre-commit:

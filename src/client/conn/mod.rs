@@ -24,7 +24,7 @@
 //!
 //! The protocol is responsible for encoding and decoding request and response objects.
 //!
-//! Protocols implement the [`Protocol`] trait, which is a service that accepts a [`ProtocolRequest`] and
+//! Protocols implement the [`Protocol`] trait, which is a service that accepts an IO stream and
 //! returns a connection. The connection is responsible for sending and receiving requests and responses.
 //!
 //! ## Connection

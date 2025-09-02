@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::future::{Ready, ready};
+use std::future::{Future, Ready, ready};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{Context, Poll};
 
@@ -249,5 +249,245 @@ where
 
     fn call(&mut self, _: &R) -> Self::Future {
         ready(Ok(self.address.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    use static_assertions::assert_impl_all;
+
+    assert_impl_all!(SocketAddrs: Send, Sync, Clone, Default);
+    assert_impl_all!(IpVersion: Send, Sync, Clone, Copy, PartialEq, Eq, std::hash::Hash);
+    assert_impl_all!(StaticResolver<u32>: Send, Sync, Clone, Default, PartialEq, Eq);
+
+    #[test]
+    fn test_socket_addrs_default() {
+        let addrs = SocketAddrs::default();
+        assert!(addrs.is_empty());
+        assert_eq!(addrs.len(), 0);
+        assert_eq!(addrs.peek(), None);
+    }
+
+    #[test]
+    fn test_socket_addrs_from_socket_addr() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addrs = SocketAddrs::from(addr);
+
+        assert!(!addrs.is_empty());
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs.peek(), Some(addr));
+    }
+
+    #[test]
+    fn test_socket_addrs_from_iterator() {
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
+        let vec_addrs = vec![addr1, addr2];
+
+        let addrs: SocketAddrs = vec_addrs.into_iter().collect();
+
+        assert!(!addrs.is_empty());
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs.peek(), Some(addr1));
+    }
+
+    #[test]
+    fn test_socket_addrs_set_port() {
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080));
+        let mut addrs: SocketAddrs = vec![addr1, addr2].into_iter().collect();
+
+        addrs.set_port(9090);
+
+        let modified: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(modified[0].port(), 9090);
+        assert_eq!(modified[1].port(), 9090);
+    }
+
+    #[test]
+    fn test_socket_addrs_pop() {
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
+        let mut addrs: SocketAddrs = vec![addr1, addr2].into_iter().collect();
+
+        assert_eq!(addrs.pop(), Some(addr1));
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs.peek(), Some(addr2));
+
+        assert_eq!(addrs.pop(), Some(addr2));
+        assert_eq!(addrs.len(), 0);
+        assert!(addrs.is_empty());
+
+        assert_eq!(addrs.pop(), None);
+    }
+
+    #[test]
+    fn test_socket_addrs_sort_preferred_ipv4() {
+        let v4_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let v6_addr = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080));
+        let mut addrs: SocketAddrs = vec![v6_addr, v4_addr].into_iter().collect();
+
+        addrs.sort_preferred(Some(IpVersion::V4));
+
+        let sorted: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(sorted[0], v4_addr);
+        assert_eq!(sorted[1], v6_addr);
+    }
+
+    #[test]
+    fn test_socket_addrs_sort_preferred_ipv6() {
+        let v4_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let v6_addr = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080));
+        let mut addrs: SocketAddrs = vec![v4_addr, v6_addr].into_iter().collect();
+
+        addrs.sort_preferred(Some(IpVersion::V6));
+
+        let sorted: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(sorted[0], v6_addr);
+        assert_eq!(sorted[1], v4_addr);
+    }
+
+    #[test]
+    fn test_socket_addrs_sort_preferred_none() {
+        let v4_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let v6_addr = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080));
+        let mut addrs: SocketAddrs = vec![v4_addr, v6_addr].into_iter().collect();
+
+        addrs.sort_preferred(None);
+
+        let sorted: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(sorted[0], v6_addr);
+        assert_eq!(sorted[1], v4_addr);
+    }
+
+    #[test]
+    fn test_socket_addrs_sort_preferred_single_v4() {
+        let v4_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let mut addrs: SocketAddrs = vec![v4_addr].into_iter().collect();
+
+        addrs.sort_preferred(Some(IpVersion::V6));
+
+        let sorted: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(sorted[0], v4_addr);
+    }
+
+    #[test]
+    fn test_socket_addrs_into_iterator() {
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
+        let addrs: SocketAddrs = vec![addr1, addr2].into_iter().collect();
+
+        let collected: Vec<SocketAddr> = addrs.into_iter().collect();
+        assert_eq!(collected, vec![addr1, addr2]);
+    }
+
+    #[test]
+    fn test_socket_addrs_iter_ref() {
+        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let addr2 = SocketAddr::from(([127, 0, 0, 1], 8081));
+        let addrs: SocketAddrs = vec![addr1, addr2].into_iter().collect();
+
+        let collected: Vec<&SocketAddr> = (&addrs).into_iter().collect();
+        assert_eq!(collected, vec![&addr1, &addr2]);
+    }
+
+    #[test]
+    fn test_ip_version_from_binding() {
+        let v4_addr = Ipv4Addr::LOCALHOST;
+        let v6_addr = Ipv6Addr::LOCALHOST;
+
+        assert_eq!(
+            IpVersion::from_binding(Some(v4_addr), None),
+            Some(IpVersion::V4)
+        );
+        assert_eq!(
+            IpVersion::from_binding(None, Some(v6_addr)),
+            Some(IpVersion::V6)
+        );
+        assert_eq!(
+            IpVersion::from_binding(Some(v4_addr), Some(v6_addr)),
+            Some(IpVersion::V6)
+        );
+        assert_eq!(IpVersion::from_binding(None, None), None);
+    }
+
+    #[test]
+    fn test_ip_version_methods() {
+        let v4 = IpVersion::V4;
+        let v6 = IpVersion::V6;
+
+        assert!(v4.is_v4());
+        assert!(!v4.is_v6());
+
+        assert!(!v6.is_v4());
+        assert!(v6.is_v6());
+    }
+
+    #[test]
+    fn test_ip_version_ext_socket_addr() {
+        let v4_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let v6_addr = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8080));
+
+        assert_eq!(v4_addr.version(), IpVersion::V4);
+        assert_eq!(v6_addr.version(), IpVersion::V6);
+    }
+
+    #[test]
+    fn test_ip_version_ext_ip_addr() {
+        let v4_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let v6_ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
+
+        assert_eq!(v4_ip.version(), IpVersion::V4);
+        assert_eq!(v6_ip.version(), IpVersion::V6);
+    }
+
+    #[test]
+    fn test_static_resolver_new() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let resolver = StaticResolver::new(addr);
+
+        assert_eq!(resolver.address, addr);
+    }
+
+    #[test]
+    fn test_static_resolver_default() {
+        let resolver = StaticResolver::<u32>::default();
+        assert_eq!(resolver.address, 0u32);
+    }
+
+    #[test]
+    fn test_static_resolver_service() {
+        use std::task::{Context, Poll};
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let resolver = StaticResolver::new(addr);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let _request = "test_request";
+        let future = ready(Ok::<SocketAddr, Infallible>(resolver.address));
+        let mut future = Box::pin(future);
+
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(result)) => assert_eq!(result, addr),
+            Poll::Ready(Err(_)) => panic!("Expected Ok result"),
+            Poll::Pending => panic!("Expected ready result"),
+        }
+    }
+
+    #[test]
+    fn test_static_resolver_clone_eq() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let resolver1 = StaticResolver::new(addr);
+        let resolver2 = resolver1.clone();
+
+        assert_eq!(resolver1, resolver2);
+
+        let resolver3 = StaticResolver::new(SocketAddr::from(([127, 0, 0, 1], 9090)));
+        assert_ne!(resolver1, resolver3);
     }
 }

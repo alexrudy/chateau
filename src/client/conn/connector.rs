@@ -734,3 +734,111 @@ mod future {
         Request(#[pin] S::Future),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use static_assertions::assert_impl_all;
+
+    assert_impl_all!(ConnectorMeta: Send, Sync);
+    assert_impl_all!(Error<std::io::Error, std::io::Error, std::io::Error>: std::error::Error, Send, Sync);
+
+    #[test]
+    fn test_error_variants() {
+        use std::convert::Infallible;
+
+        let resolving_error: Error<String, Infallible, Infallible> =
+            Error::Resolving("test".to_string());
+        assert_eq!(format!("{resolving_error}"), "resolving address");
+
+        let connecting_error: Error<Infallible, String, Infallible> =
+            Error::Connecting("test".to_string());
+        assert_eq!(format!("{connecting_error}"), "creating connection");
+
+        let handshaking_error: Error<Infallible, Infallible, String> =
+            Error::Handshaking("test".to_string());
+        assert_eq!(format!("{handshaking_error}"), "handshaking connection");
+
+        let unavailable_error: Error<Infallible, Infallible, Infallible> = Error::Unavailable;
+        assert_eq!(format!("{unavailable_error}"), "connection closed");
+    }
+
+    #[test]
+    fn test_error_equality() {
+        use std::convert::Infallible;
+
+        let error1: Error<String, Infallible, Infallible> = Error::Resolving("test".to_string());
+        let error2: Error<String, Infallible, Infallible> = Error::Resolving("test".to_string());
+        let error3: Error<String, Infallible, Infallible> =
+            Error::Resolving("different".to_string());
+
+        assert_eq!(error1, error2);
+        assert_ne!(error1, error3);
+    }
+
+    #[cfg(feature = "mock")]
+    mod mock_tests {
+        use super::*;
+        use crate::client::conn::protocol::mock::{MockProtocol, MockRequest};
+        use crate::client::conn::transport::mock::{MockResolver, MockTransport};
+
+        #[test]
+        fn test_connector_new() {
+            let resolver = MockResolver {};
+            let transport = MockTransport::single();
+            let protocol = MockProtocol::default();
+            let request = MockRequest;
+
+            let connector = Connector::new(resolver, transport, protocol, request);
+
+            assert!(!connector.shareable);
+            assert!(connector.request.is_some());
+        }
+
+        #[test]
+        fn test_connector_debug() {
+            let resolver = MockResolver {};
+            let transport = MockTransport::single();
+            let protocol = MockProtocol::default();
+            let request = MockRequest;
+
+            let connector = Connector::new(resolver, transport, protocol, request);
+            let debug_str = format!("{connector:?}");
+
+            assert!(debug_str.contains("Connector"));
+            assert!(debug_str.contains("state"));
+        }
+
+        #[test]
+        fn test_connector_layer_new() {
+            let resolver = MockResolver {};
+            let transport = MockTransport::single();
+            let protocol = MockProtocol::default();
+
+            let layer = ConnectorLayer::new(resolver, transport, protocol);
+
+            let debug_str = format!("{layer:?}");
+            assert!(debug_str.contains("ConnectorLayer"));
+        }
+
+        #[test]
+        fn test_connector_service_new() {
+            let inner_service = tower::service_fn(
+                |_: (crate::client::conn::protocol::mock::MockSender, MockRequest)| async {
+                    Ok::<_, std::convert::Infallible>(
+                        crate::client::conn::protocol::mock::MockResponse,
+                    )
+                },
+            );
+            let resolver = MockResolver {};
+            let transport = MockTransport::single();
+            let protocol = MockProtocol::default();
+
+            let service = ConnectorService::new(inner_service, resolver, transport, protocol);
+
+            let debug_str = format!("{service:?}");
+            assert!(debug_str.contains("ConnectorService"));
+        }
+    }
+}
