@@ -19,6 +19,8 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio::net::UnixListener;
 
+#[cfg(feature = "client")]
+use crate::client::pool::PoolableStream;
 use crate::info::HasConnectionInfo;
 #[cfg(feature = "server")]
 use crate::server::Accept;
@@ -174,6 +176,13 @@ impl HasConnectionInfo for UnixStream {
             local_addr,
             remote_addr,
         }
+    }
+}
+
+#[cfg(feature = "client")]
+impl PoolableStream for UnixStream {
+    fn can_share(&self) -> bool {
+        false
     }
 }
 

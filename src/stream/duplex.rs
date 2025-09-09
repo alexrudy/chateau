@@ -34,6 +34,9 @@ use std::{
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(feature = "client")]
+use crate::client::pool::PoolableStream;
+
 use crate::info::{self, HasConnectionInfo};
 
 #[cfg(feature = "server")]
@@ -99,6 +102,13 @@ impl DuplexStream {
             },
             DuplexStream { inner: b, info },
         )
+    }
+}
+
+#[cfg(feature = "client")]
+impl PoolableStream for DuplexStream {
+    fn can_share(&self) -> bool {
+        false
     }
 }
 
