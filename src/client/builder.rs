@@ -415,7 +415,7 @@ mod tests {
         struct TestKey(String);
 
         impl Key<MockRequest> for TestKey {
-            fn build(_request: &MockRequest) -> Result<Self, crate::client::pool::KeyError> {
+            fn build_key(_request: &MockRequest) -> Result<Self, crate::client::pool::KeyError> {
                 Ok(TestKey("test".to_string()))
             }
         }

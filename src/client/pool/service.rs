@@ -211,7 +211,7 @@ where
         Checkout<D, T, P, R>,
         ConnectionError<D::Error, T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>,
     > {
-        let key: K = K::build(&request)?;
+        let key: K = K::build_key(&request)?;
         let resolver = self.resolver.clone();
         let protocol = self.protocol.clone();
         let transport = self.transport.clone();

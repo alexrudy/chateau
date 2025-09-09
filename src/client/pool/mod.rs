@@ -58,10 +58,20 @@ pub struct KeyError {
     inner: BoxError,
 }
 
+impl KeyError {
+    /// Create a new `KeyError` from an error
+    pub fn new<E>(err: E) -> Self
+    where
+        E: Into<BoxError>,
+    {
+        Self { inner: err.into() }
+    }
+}
+
 /// Key which links an address and request to a connection.
 pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
     /// Build a pool key from an address and request
-    fn build(request: &R) -> Result<Self, KeyError>
+    fn build_key(request: &R) -> Result<Self, KeyError>
     where
         Self: Sized;
 }
@@ -708,7 +718,7 @@ mod tests {
     struct MockKey;
 
     impl super::Key<MockRequest> for MockKey {
-        fn build(_: &MockRequest) -> Result<Self, KeyError>
+        fn build_key(_: &MockRequest) -> Result<Self, KeyError>
         where
             Self: Sized,
         {
