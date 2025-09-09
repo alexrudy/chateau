@@ -15,7 +15,7 @@ use tower::Service;
 use self::oneshot::Oneshot;
 
 #[cfg(feature = "tls")]
-pub use self::tls::{StaticHostTlsTransport, TlsTransport};
+pub use self::tls::{StaticHostTlsTransport, TlsAddr, TlsAddress, TlsTransport};
 #[cfg(feature = "tls")]
 use crate::client::default_tls_config;
 
@@ -37,7 +37,7 @@ pub mod unix;
 /// an IO stream, which must be compatible with a [`super::Protocol`].
 pub trait Transport<Addr>: Send {
     /// The type of IO stream used by this transport
-    type IO: HasConnectionInfo<Addr = Addr> + Send + 'static;
+    type IO: HasConnectionInfo + Send + 'static;
 
     /// Error returned when connection fails
     type Error: std::error::Error + Send + Sync + 'static;
@@ -63,7 +63,7 @@ where
     T: Clone + Send + Sync + 'static,
     T::Error: std::error::Error + Send + Sync + 'static,
     T::Future: Send + 'static,
-    IO: HasConnectionInfo<Addr = Addr> + Send + 'static,
+    IO: HasConnectionInfo + Send + 'static,
     Addr: Send,
 {
     type IO = IO;

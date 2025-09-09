@@ -129,7 +129,7 @@ where
     Handshake {
         #[pin]
         future: <P as Protocol<T::IO, R>>::Future,
-        info: ConnectionInfo<D::Address>,
+        info: ConnectionInfo<<<T as Transport<D::Address>>::IO as HasConnectionInfo>::Addr>,
     },
 }
 

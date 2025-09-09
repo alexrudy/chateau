@@ -1,5 +1,6 @@
 //! Wrap a transport with TLS
 
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -146,6 +147,90 @@ where
         let future = self.transport.connect(req);
 
         future::TlsConnectionFuture::new(future, config, host)
+    }
+}
+
+impl<T, A> tower::Service<TlsAddr<A>> for TlsTransport<T>
+where
+    T: Transport<A>,
+    T::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
+    A: Clone + Send + Unpin,
+{
+    type Response = TlsStream<T::IO>;
+    type Error = TlsConnectionError<T::Error>;
+    type Future = future::TlsConnectionFuture<T, A>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.transport
+            .poll_ready(cx)
+            .map_err(TlsConnectionError::Connection)
+    }
+
+    fn call(&mut self, req: TlsAddr<A>) -> Self::Future {
+        let config = self.config.clone();
+        let (address, hostname) = req.into_parts();
+        let future = self.transport.connect(address);
+        future::TlsConnectionFuture::new(future, config, hostname)
+    }
+}
+
+/// Address wrapper that combines any address type with a hostname for TLS verification.
+///
+/// This generic type allows using DNS resolvers that return any address type with TLS
+/// transports that require hostname information for certificate verification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TlsAddr<A> {
+    /// The address to connect to
+    pub addr: A,
+    /// The hostname to use for TLS certificate verification
+    pub hostname: String,
+}
+
+impl<A> TlsAddr<A> {
+    /// Create a new TLS address
+    pub fn new(addr: A, hostname: impl Into<String>) -> Self {
+        Self {
+            addr,
+            hostname: hostname.into(),
+        }
+    }
+
+    /// Get the inner address
+    pub fn addr(&self) -> &A {
+        &self.addr
+    }
+
+    /// Get the hostname
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    /// Extract the inner address
+    pub fn into_addr(self) -> A {
+        self.addr
+    }
+
+    /// Extract both the address and hostname
+    pub fn into_parts(self) -> (A, String) {
+        (self.addr, self.hostname)
+    }
+}
+
+impl<A> From<(A, String)> for TlsAddr<A> {
+    fn from((addr, hostname): (A, String)) -> Self {
+        Self::new(addr, hostname)
+    }
+}
+
+impl<A> From<(A, &str)> for TlsAddr<A> {
+    fn from((addr, hostname): (A, &str)) -> Self {
+        Self::new(addr, hostname)
+    }
+}
+
+impl<A: fmt::Display> fmt::Display for TlsAddr<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}://{}", self.hostname, self.addr)
     }
 }
 
@@ -304,3 +389,6 @@ pub(in crate::client::conn::transport) mod future {
         }
     }
 }
+
+#[cfg(test)]
+mod test {}

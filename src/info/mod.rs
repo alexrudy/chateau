@@ -75,3 +75,10 @@ pub trait HasConnectionInfo {
     /// Get the connection information for this stream.
     fn info(&self) -> ConnectionInfo<Self::Addr>;
 }
+
+#[cfg(not(feature = "tls"))]
+/// Trait for types which can provide TLS connection information, not populated without the `tls` feature.
+pub trait HasTlsConnectionInfo {}
+
+#[cfg(not(feature = "tls"))]
+impl<T> HasTlsConnectionInfo for T where T: HasConnectionInfo {}
