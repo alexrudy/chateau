@@ -16,6 +16,9 @@ use crate::info::HasConnectionInfo;
 pub trait TlsAddress {
     /// Get the TLS domain to use for TLS conenctions
     fn domain(&self) -> Option<&str>;
+
+    /// Check if the address expects us to use TLS
+    fn use_tls(&self) -> bool;
 }
 
 /// Wrapper around a transport which adds TLS encryption when connecting
@@ -234,7 +237,9 @@ impl<A: fmt::Display> fmt::Display for TlsAddr<A> {
     }
 }
 
-pub(in crate::client::conn::transport) mod future {
+pub mod future {
+    //! TLS Connection Futures
+
     use std::fmt;
     use std::future::Future;
     use std::sync::Arc;
@@ -285,6 +290,7 @@ pub(in crate::client::conn::transport) mod future {
         }
     }
 
+    /// Future returned from `TlsTransport` which produces transport.
     #[pin_project]
     #[derive(Debug)]
     pub struct TlsConnectionFuture<T, A>
@@ -322,8 +328,8 @@ pub(in crate::client::conn::transport) mod future {
     impl<T, A> Future for TlsConnectionFuture<T, A>
     where
         T: Transport<A>,
-        <T as Transport<A>>::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
-        A: Clone + Send + Unpin,
+        <T as Transport<A>>::IO: HasConnectionInfo + AsyncRead + AsyncWrite + Unpin,
+        <<T as Transport<A>>::IO as HasConnectionInfo>::Addr: Clone + Send + Unpin,
     {
         type Output = Result<TlsStream<T::IO>, TlsConnectionError<T::Error>>;
 
