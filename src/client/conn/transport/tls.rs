@@ -1,6 +1,5 @@
 //! Wrap a transport with TLS
 
-use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -13,7 +12,7 @@ use crate::client::conn::stream::tls::TlsStream;
 use crate::info::HasConnectionInfo;
 
 /// Trait for types which can describe a TLS domain for TLS connections
-pub trait TlsAddress {
+pub trait TlsRequest {
     /// Get the TLS domain to use for TLS conenctions
     fn domain(&self) -> Option<&str>;
 
@@ -66,15 +65,15 @@ impl<T> StaticHostTlsTransport<T> {
     }
 }
 
-impl<T, A> tower::Service<A> for StaticHostTlsTransport<T>
+impl<T, R> tower::Service<&R> for StaticHostTlsTransport<T>
 where
-    T: Transport<A>,
-    <T as Transport<A>>::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
-    A: Clone + Send + Unpin,
+    T: Transport<R>,
+    <T as Transport<R>>::IO: HasConnectionInfo + AsyncRead + AsyncWrite + Unpin,
+    <<T as Transport<R>>::IO as HasConnectionInfo>::Addr: Clone + Send + Unpin,
 {
     type Response = TlsStream<T::IO>;
     type Error = TlsConnectionError<T::Error>;
-    type Future = future::TlsConnectionFuture<T, A>;
+    type Future = future::TlsConnectionFuture<T, R>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.transport
@@ -82,7 +81,7 @@ where
             .map_err(TlsConnectionError::Connection)
     }
 
-    fn call(&mut self, req: A) -> Self::Future {
+    fn call(&mut self, req: &R) -> Self::Future {
         let config = self.config.clone();
         let host = self.host.clone();
         let future = self.transport.connect(req);
@@ -125,15 +124,16 @@ impl<T> TlsTransport<T> {
     }
 }
 
-impl<T, A> tower::Service<A> for TlsTransport<T>
+impl<T, R> tower::Service<&R> for TlsTransport<T>
 where
-    T: Transport<A>,
-    <T as Transport<A>>::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
-    A: TlsAddress + Clone + Send + Unpin,
+    R: TlsRequest,
+    T: Transport<R>,
+    <T as Transport<R>>::IO: HasConnectionInfo + AsyncRead + AsyncWrite + Unpin,
+    <<T as Transport<R>>::IO as HasConnectionInfo>::Addr: TlsRequest + Clone + Send + Unpin,
 {
     type Response = TlsStream<T::IO>;
     type Error = TlsConnectionError<T::Error>;
-    type Future = future::TlsConnectionFuture<T, A>;
+    type Future = future::TlsConnectionFuture<T, R>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.transport
@@ -141,7 +141,7 @@ where
             .map_err(TlsConnectionError::Connection)
     }
 
-    fn call(&mut self, req: A) -> Self::Future {
+    fn call(&mut self, req: &R) -> Self::Future {
         let config = self.config.clone();
         let Some(host) = req.domain().map(String::from) else {
             return future::TlsConnectionFuture::error(TlsConnectionError::NoDomain);
@@ -150,90 +150,6 @@ where
         let future = self.transport.connect(req);
 
         future::TlsConnectionFuture::new(future, config, host)
-    }
-}
-
-impl<T, A> tower::Service<TlsAddr<A>> for TlsTransport<T>
-where
-    T: Transport<A>,
-    T::IO: HasConnectionInfo<Addr = A> + AsyncRead + AsyncWrite + Unpin,
-    A: Clone + Send + Unpin,
-{
-    type Response = TlsStream<T::IO>;
-    type Error = TlsConnectionError<T::Error>;
-    type Future = future::TlsConnectionFuture<T, A>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.transport
-            .poll_ready(cx)
-            .map_err(TlsConnectionError::Connection)
-    }
-
-    fn call(&mut self, req: TlsAddr<A>) -> Self::Future {
-        let config = self.config.clone();
-        let (address, hostname) = req.into_parts();
-        let future = self.transport.connect(address);
-        future::TlsConnectionFuture::new(future, config, hostname)
-    }
-}
-
-/// Address wrapper that combines any address type with a hostname for TLS verification.
-///
-/// This generic type allows using DNS resolvers that return any address type with TLS
-/// transports that require hostname information for certificate verification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TlsAddr<A> {
-    /// The address to connect to
-    pub addr: A,
-    /// The hostname to use for TLS certificate verification
-    pub hostname: String,
-}
-
-impl<A> TlsAddr<A> {
-    /// Create a new TLS address
-    pub fn new(addr: A, hostname: impl Into<String>) -> Self {
-        Self {
-            addr,
-            hostname: hostname.into(),
-        }
-    }
-
-    /// Get the inner address
-    pub fn addr(&self) -> &A {
-        &self.addr
-    }
-
-    /// Get the hostname
-    pub fn hostname(&self) -> &str {
-        &self.hostname
-    }
-
-    /// Extract the inner address
-    pub fn into_addr(self) -> A {
-        self.addr
-    }
-
-    /// Extract both the address and hostname
-    pub fn into_parts(self) -> (A, String) {
-        (self.addr, self.hostname)
-    }
-}
-
-impl<A> From<(A, String)> for TlsAddr<A> {
-    fn from((addr, hostname): (A, String)) -> Self {
-        Self::new(addr, hostname)
-    }
-}
-
-impl<A> From<(A, &str)> for TlsAddr<A> {
-    fn from((addr, hostname): (A, &str)) -> Self {
-        Self::new(addr, hostname)
-    }
-}
-
-impl<A: fmt::Display> fmt::Display for TlsAddr<A> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}://{}", self.hostname, self.addr)
     }
 }
 

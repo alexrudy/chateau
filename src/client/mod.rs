@@ -10,7 +10,6 @@ use crate::services::SharedService;
 
 use self::builder::NeedsProtocol;
 use self::builder::NeedsRequest;
-use self::builder::NeedsResolver;
 use self::builder::NeedsTransport;
 pub use self::pool::Config as PoolConfig;
 pub use self::pool::service::ConnectionPoolLayer;
@@ -46,8 +45,7 @@ impl<Req, Res, Err> Client<Req, Res, Err> {
     }
 
     /// Create a new client builder
-    pub fn builder()
-    -> builder::ClientBuilder<NeedsResolver, NeedsTransport, NeedsProtocol, NeedsRequest> {
+    pub fn builder() -> builder::ClientBuilder<NeedsTransport, NeedsProtocol, NeedsRequest> {
         builder::ClientBuilder::new()
     }
 }

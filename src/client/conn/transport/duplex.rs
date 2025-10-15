@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use crate::BoxFuture;
 
-use crate::stream::duplex::{DuplexAddr, DuplexStream};
+use crate::stream::duplex::DuplexStream;
 
 /// Transport via duplex stream
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ impl DuplexTransport {
     }
 }
 
-impl tower::Service<DuplexAddr> for DuplexTransport {
+impl<R> tower::Service<R> for DuplexTransport {
     type Response = DuplexStream;
 
     type Error = io::Error;
@@ -35,7 +35,7 @@ impl tower::Service<DuplexAddr> for DuplexTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _req: DuplexAddr) -> Self::Future {
+    fn call(&mut self, _req: R) -> Self::Future {
         let client = self.client.clone();
         let max_buf_size = self.max_buf_size;
         let fut = async move {
@@ -62,10 +62,9 @@ mod test_roundtrip {
 
         let transport = DuplexTransport::new(1024, client);
 
-        let (io, _) = tokio::join!(
-            async { transport.oneshot(DuplexAddr::new()).await.unwrap() },
-            async { srv.accept().await.unwrap() }
-        );
+        let (io, _) = tokio::join!(async { transport.oneshot(()).await.unwrap() }, async {
+            srv.accept().await.unwrap()
+        });
         let info = io.info();
 
         assert_eq!(info.local_addr, DuplexAddr::new());

@@ -48,7 +48,6 @@ use super::conn::Connection;
 use super::conn::Connector;
 use super::conn::Protocol;
 use super::conn::Transport;
-use super::conn::dns::Resolver;
 
 /// Error building a key
 #[derive(Debug, thiserror::Error)]
@@ -164,23 +163,20 @@ where
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
     #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
-    pub(crate) fn checkout<D, T, P>(
+    pub(crate) fn checkout<T, P>(
         &self,
         key: K,
         multiplex: bool,
-        connector: Connector<D, T, P, R>,
-    ) -> Checkout<D, T, P, R>
+        connector: Connector<T, P, R>,
+    ) -> Checkout<T, P, R>
     where
-        D: Resolver<R> + Send + 'static,
-        D::Address: Send,
-        D::Future: Send,
-        T: Transport<D::Address>,
+        T: Transport<R>,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
         C: PoolableConnection<R>,
     {
         let mut inner = self.inner.lock();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut connector: Option<Connector<D, T, P, R>> = Some(connector);
+        let mut connector: Option<Connector<T, P, R>> = Some(connector);
         let token = self.keys.lock().insert(key);
 
         if let Some(connection) = inner.pop(token) {

@@ -59,11 +59,7 @@ use super::pool::KeyError;
 /// Error that can occur during the connection and serving process.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum ConnectionError<D, T, P, S> {
-    /// Error occurred during the address resolution
-    #[error("resolving address")]
-    Resolving(#[source] D),
-
+pub enum ConnectionError<T, P, S> {
     /// Error occurred during the connection
     #[error("creating connection")]
     Connecting(#[source] T),
@@ -85,10 +81,9 @@ pub enum ConnectionError<D, T, P, S> {
     Key(#[from] KeyError),
 }
 
-impl<D, T, P, S> From<connector::Error<D, T, P>> for ConnectionError<D, T, P, S> {
-    fn from(value: connector::Error<D, T, P>) -> Self {
+impl<T, P, S> From<connector::Error<T, P>> for ConnectionError<T, P, S> {
+    fn from(value: connector::Error<T, P>) -> Self {
         match value {
-            connector::Error::Resolving(d) => ConnectionError::Resolving(d),
             connector::Error::Connecting(t) => ConnectionError::Connecting(t),
             connector::Error::Handshaking(p) => ConnectionError::Handshaking(p),
             connector::Error::Unavailable => ConnectionError::Unavailable,

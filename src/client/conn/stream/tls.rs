@@ -11,7 +11,6 @@ use rustls::ClientConfig;
 use std::net::ToSocketAddrs;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::client::conn::transport::TlsAddr;
 use crate::client::pool::PoolableStream;
 use crate::info::TlsConnectionInfo;
 use crate::info::tls::HasTlsConnectionInfo;
@@ -49,7 +48,7 @@ where
     IO: HasConnectionInfo,
 {
     state: State<IO>,
-    info: ConnectionInfo<TlsAddr<IO::Addr>>,
+    info: ConnectionInfo<IO::Addr>,
     tls: Option<TlsConnectionInfo>,
 }
 
@@ -58,7 +57,7 @@ where
     IO: HasConnectionInfo,
     IO::Addr: Clone,
 {
-    type Addr = TlsAddr<IO::Addr>;
+    type Addr = IO::Addr;
 
     fn info(&self) -> ConnectionInfo<Self::Addr> {
         self.info.clone()
@@ -96,7 +95,7 @@ where
             .expect("should be valid dns name")
             .to_owned();
 
-        let info = stream.info().map(|addr| TlsAddr::new(addr, hostname));
+        let info = stream.info();
         let connect = tokio_rustls::TlsConnector::from(config).connect(server_name, stream);
 
         Self {
