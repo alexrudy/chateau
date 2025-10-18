@@ -3,11 +3,7 @@
 //! Transports are responsible for establishing a connection to a remote server, shuffling bytes back and forth,
 
 use std::future::Future;
-#[cfg(feature = "tls")]
-use std::sync::Arc;
 
-#[cfg(feature = "tls")]
-use rustls::client::ClientConfig;
 #[cfg(feature = "tls")]
 use thiserror::Error;
 use tower::Service;
@@ -16,8 +12,6 @@ use self::oneshot::Oneshot;
 
 #[cfg(feature = "tls")]
 pub use self::tls::{StaticHostTlsTransport, TlsRequest, TlsTransport};
-#[cfg(feature = "tls")]
-use crate::client::default_tls_config;
 
 use crate::info::HasConnectionInfo;
 
@@ -35,7 +29,7 @@ pub mod unix;
 ///
 /// To implement a transport stream, implement a [`tower::Service`] which accepts an address and returns
 /// an IO stream, which must be compatible with a [`super::Protocol`].
-pub trait Transport<Req>: Send {
+pub trait Transport<Req> {
     /// The type of IO stream used by this transport
     type IO: HasConnectionInfo + Send + 'static;
 
@@ -82,24 +76,6 @@ where
 
 /// Extension trait for Transports to provide additional configuration options.
 pub trait TransportExt<Req>: Transport<Req> {
-    #[cfg(feature = "tls")]
-    /// Wrap the transport in a TLS layer.
-    fn with_tls(self, config: Arc<ClientConfig>) -> TlsTransport<Self>
-    where
-        Self: Sized,
-    {
-        TlsTransport::new(self, config)
-    }
-
-    #[cfg(feature = "tls")]
-    /// Wrap the transport in a TLS layer configured with a default client configuration.
-    fn with_default_tls(self) -> TlsTransport<Self>
-    where
-        Self: Sized,
-    {
-        TlsTransport::new(self, default_tls_config().into())
-    }
-
     /// Create a future which uses the given transport to connect after calling poll_ready.
     fn oneshot(self, request: Req) -> Oneshot<Self, Req>
     where

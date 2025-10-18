@@ -13,8 +13,8 @@ use crate::BoxError;
 use crate::{notify, services::MakeServiceRef};
 
 pub use self::builder::{NeedsAcceptor, NeedsExecutor, NeedsProtocol, NeedsService};
-use self::conn::drivers::{ConnectionDriver, ServerExecutor};
-use self::conn::drivers::{GracefulConnectionDriver, GracefulServerExecutor};
+pub use self::conn::drivers::{ConnectionDriver, ServerExecutor};
+pub use self::conn::drivers::{GracefulConnectionDriver, GracefulServerExecutor};
 
 /// Trait for accepting new connections from raw streams.
 pub use self::conn::Accept;

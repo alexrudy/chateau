@@ -176,7 +176,7 @@ where
 
 impl<T, P, S, R, K> ConnectionPoolService<T, P, S, R, K>
 where
-    T: Transport<R> + Clone,
+    T: Transport<R> + Clone + Send,
     T::IO: Unpin,
     P: Protocol<T::IO, R> + Clone + Send + Sync + 'static,
     <P as Protocol<T::IO, R>>::Connection: PoolableConnection<R> + Send + 'static,

@@ -92,6 +92,15 @@ impl<R: Clone> Clone for TcpTransport<R> {
     }
 }
 
+impl<R: Default> Default for TcpTransport<R> {
+    fn default() -> Self {
+        Self {
+            resolver: R::default(),
+            config: Arc::new(TcpTransportConfig::default()),
+        }
+    }
+}
+
 impl<R> TcpTransport<R> {
     /// Create a new TCP transport
     pub fn new(resolver: R, config: Arc<TcpTransportConfig>) -> Self {

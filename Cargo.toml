@@ -45,7 +45,7 @@ static-assertions = { version = "1", package = "static_assertions" }
 webpki-roots.version = "1.0"
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 tokio = { version = "1", features = ["macros", "time"] }
-
+tracing-test = "0.1"
 
 [dev-dependencies.tracing-subscriber]
 version = "^0.3"

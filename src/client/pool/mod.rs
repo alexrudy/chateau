@@ -170,7 +170,7 @@ where
         connector: Connector<T, P, R>,
     ) -> Checkout<T, P, R>
     where
-        T: Transport<R>,
+        T: Transport<R> + Send,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
         C: PoolableConnection<R>,
     {

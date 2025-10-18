@@ -11,15 +11,6 @@ use super::{TlsConnectionError, Transport};
 use crate::client::conn::stream::tls::TlsStream;
 use crate::info::HasConnectionInfo;
 
-/// Trait for types which can describe a TLS domain for TLS connections
-pub trait TlsRequest {
-    /// Get the TLS domain to use for TLS conenctions
-    fn domain(&self) -> Option<&str>;
-
-    /// Check if the address expects us to use TLS
-    fn use_tls(&self) -> bool;
-}
-
 /// Wrapper around a transport which adds TLS encryption when connecting
 /// to a static hostname.
 #[derive(Debug, Clone)]
@@ -90,6 +81,56 @@ where
     }
 }
 
+/// Request wrapper for TLS information
+///
+/// Allows other services to re-use the infrastructure here
+/// by providing a TlsRequest wrapped around their custom request type.
+#[derive(Debug, Clone)]
+pub struct TlsRequest<R> {
+    request: R,
+    domain: Option<String>,
+}
+
+impl<R> TlsRequest<R> {
+    /// Returns true if the request should be sent over TLS.
+    pub fn use_tls(&self) -> bool {
+        self.domain.is_some()
+    }
+
+    /// Returns the domain name for TLS negotiation.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// Reference the inner request
+    pub fn request(&self) -> &R {
+        &self.request
+    }
+
+    /// Consumes self, and returns the request.
+    pub fn into_request(self) -> R {
+        self.request
+    }
+
+    /// Consumes self and returns the request and the TLS domain
+    pub fn into_parts(self) -> (R, Option<String>) {
+        (self.request, self.domain)
+    }
+
+    /// Build a new request without a TLS domain name.
+    pub fn without_tls(request: R) -> Self {
+        Self {
+            request,
+            domain: None,
+        }
+    }
+
+    /// Build a new request
+    pub fn new(request: R, domain: Option<String>) -> Self {
+        Self { request, domain }
+    }
+}
+
 /// Transport via TLS
 #[derive(Debug, Clone)]
 pub struct TlsTransport<T> {
@@ -124,12 +165,11 @@ impl<T> TlsTransport<T> {
     }
 }
 
-impl<T, R> tower::Service<&R> for TlsTransport<T>
+impl<T, R> tower::Service<TlsRequest<&R>> for TlsTransport<T>
 where
-    R: TlsRequest,
     T: Transport<R>,
     <T as Transport<R>>::IO: HasConnectionInfo + AsyncRead + AsyncWrite + Unpin,
-    <<T as Transport<R>>::IO as HasConnectionInfo>::Addr: TlsRequest + Clone + Send + Unpin,
+    <<T as Transport<R>>::IO as HasConnectionInfo>::Addr: Clone + Send + Unpin,
 {
     type Response = TlsStream<T::IO>;
     type Error = TlsConnectionError<T::Error>;
@@ -141,13 +181,13 @@ where
             .map_err(TlsConnectionError::Connection)
     }
 
-    fn call(&mut self, req: &R) -> Self::Future {
-        let config = self.config.clone();
-        let Some(host) = req.domain().map(String::from) else {
+    fn call(&mut self, req: TlsRequest<&R>) -> Self::Future {
+        let (req, Some(host)) = req.into_parts() else {
             return future::TlsConnectionFuture::error(TlsConnectionError::NoDomain);
         };
 
         let future = self.transport.connect(req);
+        let config = self.config.clone();
 
         future::TlsConnectionFuture::new(future, config, host)
     }
@@ -233,7 +273,8 @@ pub mod future {
             }
         }
 
-        pub(super) fn error(error: TlsConnectionError<T::Error>) -> Self {
+        /// Create a future which is effectively `Ready(Err(error))` to short-circuit.
+        pub fn error(error: TlsConnectionError<T::Error>) -> Self {
             Self {
                 state: State::Error { error },
                 span: None,
