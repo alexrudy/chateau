@@ -16,7 +16,7 @@ keywords = ["tcp", "tower", "client", "server", "async"]
 futures = "0.3"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 pin-project = { version = "1" }
-rustls-native-certs = { version = "0.8.1", optional = true }
+rustls-native-certs = { version = "0.8.2", optional = true }
 socket2 = { version = "0.5" }
 thiserror = { version = "2" }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
@@ -45,7 +45,7 @@ static-assertions = { version = "1", package = "static_assertions" }
 webpki-roots.version = "1.0"
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 tokio = { version = "1", features = ["macros", "time"] }
-tracing-test = "0.1"
+tracing-test = "0.2"
 
 [dev-dependencies.tracing-subscriber]
 version = "^0.3"
