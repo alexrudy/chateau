@@ -97,15 +97,12 @@ impl MockTransport {
     }
 
     /// Create a new connector for the transport.
-    pub fn connector(
-        self,
-        request: MockRequest,
-    ) -> Connector<MockResolver, Self, MockProtocol, MockRequest> {
-        Connector::new(MockResolver {}, self, MockProtocol::default(), request)
+    pub fn connector(self, request: MockRequest) -> Connector<Self, MockProtocol, MockRequest> {
+        Connector::new(self, MockProtocol::default(), request)
     }
 }
 
-impl tower::Service<MockAddress> for MockTransport {
+impl<Req> tower::Service<Req> for MockTransport {
     type Response = MockStream;
 
     type Error = MockConnectionError;
@@ -119,7 +116,7 @@ impl tower::Service<MockAddress> for MockTransport {
         std::task::Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _req: MockAddress) -> Self::Future {
+    fn call(&mut self, _req: Req) -> Self::Future {
         let reuse = match &mut self.mode {
             TransportMode::SingleUse => false,
             TransportMode::Reusable => true,
@@ -153,5 +150,5 @@ mod tests {
     use static_assertions::assert_impl_all;
 
     assert_impl_all!(MockConnectionError: std::error::Error, Send, Sync);
-    assert_impl_all!(MockTransport: Transport<MockAddress>);
+    assert_impl_all!(MockTransport: Transport<()>);
 }

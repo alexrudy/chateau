@@ -5,6 +5,7 @@
 yanked = "warn"
 
 [licenses]
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -17,7 +18,7 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-skip-tree = ["windows-sys", "aws-lc-sys"]
+skip-tree = ["windows-sys"]
 
 [sources]
 unknown-registry = "warn"

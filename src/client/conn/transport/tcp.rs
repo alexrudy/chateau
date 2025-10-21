@@ -28,6 +28,38 @@ use crate::client::conn::dns::{IpVersion, SocketAddrs};
 use crate::happy_eyeballs::{EyeballSet, HappyEyeballsError};
 use crate::stream::tcp::TcpStream;
 
+/// A trait for resolving a TCP address from a request.
+pub trait TcpResolver<Req> {
+    /// Error returned when TCP resolution fails
+    type Error;
+
+    /// Future used to resovle TCP addresses
+    type Future: Future<Output = Result<SocketAddrs, Self::Error>>;
+
+    /// Check if the resolver is ready to resovle.
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+
+    /// Return a future to resolve an address.
+    fn resolve(&mut self, req: Req) -> Self::Future;
+}
+
+impl<T, Req> TcpResolver<Req> for T
+where
+    T: tower::Service<Req, Response = SocketAddrs>,
+{
+    type Error = T::Error;
+
+    type Future = T::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <T as tower::Service<Req>>::poll_ready(self, cx)
+    }
+
+    fn resolve(&mut self, req: Req) -> Self::Future {
+        self.call(req)
+    }
+}
+
 /// A TCP connector for client connections.
 ///
 /// This type is a [`tower::Service`] that connects to remote addresses using TCP.
@@ -46,32 +78,37 @@ use crate::stream::tcp::TcpStream;
 /// remote addresses, which allows for faster connection times by trying
 /// multiple addresses in parallel, regardless of whether they are IPv4 or IPv6.
 #[derive(Debug)]
-pub struct TcpTransport {
+pub struct TcpTransport<R> {
+    resolver: R,
     config: Arc<TcpTransportConfig>,
 }
 
-impl Clone for TcpTransport {
+impl<R: Clone> Clone for TcpTransport<R> {
     fn clone(&self) -> Self {
         Self {
+            resolver: self.resolver.clone(),
             config: self.config.clone(),
         }
     }
 }
 
-impl Default for TcpTransport {
+impl<R: Default> Default for TcpTransport<R> {
     fn default() -> Self {
-        TcpTransport::new(TcpTransportConfig::default().into())
+        Self {
+            resolver: R::default(),
+            config: Arc::new(TcpTransportConfig::default()),
+        }
     }
 }
 
-impl TcpTransport {
+impl<R> TcpTransport<R> {
     /// Create a new TCP transport
-    pub fn new(config: Arc<TcpTransportConfig>) -> Self {
-        Self { config }
+    pub fn new(resolver: R, config: Arc<TcpTransportConfig>) -> Self {
+        Self { resolver, config }
     }
 }
 
-impl TcpTransport {
+impl<R> TcpTransport<R> {
     /// Get the configuration for the TCP connector.
     pub fn config(&self) -> &TcpTransportConfig {
         &self.config
@@ -80,7 +117,12 @@ impl TcpTransport {
 
 type BoxFuture<'a, T, E> = crate::BoxFuture<'a, Result<T, E>>;
 
-impl tower::Service<SocketAddrs> for TcpTransport {
+impl<Resolver, Request> tower::Service<Request> for TcpTransport<Resolver>
+where
+    Resolver: TcpResolver<Request> + Clone + Send + 'static,
+    Resolver::Error: std::error::Error + Send + Sync + 'static,
+    Resolver::Future: Send + 'static,
+{
     type Response = TcpStream;
     type Error = TcpConnectionError;
     type Future = BoxFuture<'static, Self::Response, Self::Error>;
@@ -89,14 +131,18 @@ impl tower::Service<SocketAddrs> for TcpTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: SocketAddrs) -> Self::Future {
-        let transport = std::mem::replace(self, self.clone());
-
+    fn call(&mut self, req: Request) -> Self::Future {
+        let config = self.config.clone();
         let span = tracing::trace_span!("tcp");
+
+        let resolve = self.resolver.resolve(req);
 
         Box::pin(
             async move {
-                let stream = transport.connecting(req).connect().await?;
+                let addrs = resolve
+                    .await
+                    .map_err(TcpConnectionError::msg("resolving"))?;
+                let stream = config.connecting(addrs).connect().await?;
 
                 if let Ok(peer_addr) = stream.peer_addr() {
                     trace!(peer.addr = %peer_addr, "tcp connected");
@@ -111,32 +157,25 @@ impl tower::Service<SocketAddrs> for TcpTransport {
     }
 }
 
-impl tower::Service<SocketAddr> for TcpTransport {
-    type Response = <Self as tower::Service<SocketAddrs>>::Response;
-    type Error = <Self as tower::Service<SocketAddrs>>::Error;
-    type Future = <Self as tower::Service<SocketAddrs>>::Future;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        <Self as tower::Service<SocketAddrs>>::poll_ready(self, cx)
-    }
-
-    fn call(&mut self, req: SocketAddr) -> Self::Future {
-        let addrs = SocketAddrs::from(req);
-        <Self as tower::Service<SocketAddrs>>::call(self, addrs)
-    }
-}
-
-impl TcpTransport {
+impl TcpTransportConfig {
     /// Create a new `TcpConnecting` future.
     fn connecting(&self, mut addrs: SocketAddrs) -> TcpConnecting<'_> {
-        if self.config.happy_eyeballs_timeout.is_some() {
+        if self.happy_eyeballs_timeout.is_some() {
             addrs.sort_preferred(IpVersion::from_binding(
-                self.config.local_address_ipv4,
-                self.config.local_address_ipv6,
+                self.local_address_ipv4,
+                self.local_address_ipv6,
             ));
         }
 
-        TcpConnecting::new(addrs, &self.config)
+        TcpConnecting::new(addrs, self)
+    }
+
+    /// Connect to a single address
+    async fn connect_to_addr(&self, addr: SocketAddr) -> Result<TcpStream, TcpConnectionError> {
+        let connect = connect(&addr, self.connect_timeout, self)?;
+        connect
+            .await
+            .map_err(TcpConnectionError::msg("tcp connect error"))
     }
 }
 
@@ -369,43 +408,42 @@ impl Default for TcpTransportConfig {
 }
 
 /// A simple TCP transport that uses a single connection attempt.
-pub struct SimpleTcpTransport {
+pub struct SimpleTcpTransport<R> {
+    resolver: R,
     config: Arc<TcpTransportConfig>,
 }
 
-impl fmt::Debug for SimpleTcpTransport {
+impl<R> fmt::Debug for SimpleTcpTransport<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SimpleTcpTransport").finish()
     }
 }
 
-impl Clone for SimpleTcpTransport {
+impl<R: Clone> Clone for SimpleTcpTransport<R> {
     fn clone(&self) -> Self {
         Self {
+            resolver: self.resolver.clone(),
             config: self.config.clone(),
         }
     }
 }
 
-impl SimpleTcpTransport {
+impl<R> SimpleTcpTransport<R> {
     /// Create a new simple TCP transport with the given configuration and resolver.
-    pub fn new(config: TcpTransportConfig) -> Self {
+    pub fn new(resolver: R, config: TcpTransportConfig) -> Self {
         Self {
+            resolver,
             config: Arc::new(config),
         }
     }
 }
 
-impl SimpleTcpTransport {
-    async fn connect_to_addr(&self, addr: SocketAddr) -> Result<TcpStream, TcpConnectionError> {
-        let connect = connect(&addr, self.config.connect_timeout, &self.config)?;
-        connect
-            .await
-            .map_err(TcpConnectionError::msg("tcp connect error"))
-    }
-}
-
-impl tower::Service<SocketAddr> for SimpleTcpTransport {
+impl<R, Request> tower::Service<Request> for SimpleTcpTransport<R>
+where
+    R: TcpResolver<Request> + Clone + Send + 'static,
+    R::Error: std::error::Error + Send + Sync + 'static,
+    R::Future: Send + 'static,
+{
     type Response = TcpStream;
     type Error = TcpConnectionError;
     type Future = BoxFuture<'static, Self::Response, Self::Error>;
@@ -414,13 +452,30 @@ impl tower::Service<SocketAddr> for SimpleTcpTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: SocketAddr) -> Self::Future {
-        let transport = std::mem::replace(self, self.clone());
+    fn call(&mut self, req: Request) -> Self::Future {
+        let transport = self.config.clone();
 
-        let span = tracing::trace_span!("tcp", ip = %req.ip(), port = %req.port());
+        let span = tracing::trace_span!(
+            "tcp",
+            ip = tracing::field::Empty,
+            port = tracing::field::Empty
+        );
+        let resolve = self.resolver.resolve(req);
 
+        let span_handle = span.clone();
         async move {
-            let stream = transport.connect_to_addr(req).await?;
+            let mut addrs = resolve
+                .await
+                .map_err(TcpConnectionError::msg("resolving"))?;
+
+            let addr = addrs
+                .pop()
+                .ok_or_else(|| TcpConnectionError::new("No address found"))?;
+
+            span_handle.record("ip", addr.ip().to_string());
+            span_handle.record("port", addr.port());
+
+            let stream = transport.connect_to_addr(addr).await?;
 
             if let Ok(peer_addr) = stream.peer_addr() {
                 trace!(peer.addr = %peer_addr, "tcp connected");
@@ -541,6 +596,8 @@ pub(crate) fn connect(
 #[cfg(test)]
 mod test {
 
+    use std::convert::Infallible;
+
     use tokio::net::TcpListener;
     use tower::{Service, ServiceExt as _};
 
@@ -548,16 +605,42 @@ mod test {
 
     use super::*;
 
-    async fn connect_transport<T, R>(
-        addr: R,
-        transport: T,
-        listener: TcpListener,
-    ) -> (TcpStream, TcpStream)
+    #[derive(Debug, Clone)]
+    struct MockResolver<A> {
+        addr: A,
+    }
+
+    impl<A> MockResolver<A> {
+        fn new(addr: A) -> Self {
+            Self { addr }
+        }
+    }
+
+    impl<A, R> tower::Service<R> for MockResolver<A>
     where
-        T: Service<R, Response = TcpStream>,
-        <T as Service<R>>::Error: std::fmt::Debug,
+        A: Clone,
     {
-        tokio::join!(async { transport.oneshot(addr).await.unwrap() }, async {
+        type Response = A;
+
+        type Error = Infallible;
+
+        type Future = std::future::Ready<Result<A, Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: R) -> Self::Future {
+            std::future::ready(Ok(self.addr.clone()))
+        }
+    }
+
+    async fn connect_transport<T>(transport: T, listener: TcpListener) -> (TcpStream, TcpStream)
+    where
+        T: Service<(), Response = TcpStream>,
+        <T as Service<()>>::Error: std::fmt::Debug,
+    {
+        tokio::join!(async { transport.oneshot(()).await.unwrap() }, async {
             let (stream, addr) = listener.accept().await.unwrap();
             TcpStream::server(stream, addr)
         })
@@ -572,14 +655,12 @@ mod test {
 
         let config = TcpTransportConfig::default();
 
-        let transport = TcpTransport::new(config.into());
+        let transport = TcpTransport::new(
+            MockResolver::new(SocketAddrs::from(bind.local_addr().unwrap())),
+            config.into(),
+        );
 
-        let (stream, _) = connect_transport(
-            SocketAddrs::from(bind.local_addr().unwrap()),
-            transport,
-            bind,
-        )
-        .await;
+        let (stream, _) = connect_transport(transport, bind).await;
 
         let info = stream.info();
         assert_eq!(
@@ -592,29 +673,20 @@ mod test {
     async fn test_transport_connect_to_addrs() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        let bind = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = bind.local_addr().unwrap().port();
-
-        let config = TcpTransportConfig::default();
-        let transport = TcpTransport::new(config.into());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
         let addrs = vec![
             SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
             SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port + 1),
         ];
 
-        let (conn, _): (TcpStream, TcpStream) = tokio::join!(
-            async {
-                transport
-                    .oneshot(SocketAddrs::from_iter(addrs.into_iter()))
-                    .await
-                    .unwrap()
-            },
-            async {
-                let (stream, addr) = bind.accept().await.unwrap();
-                TcpStream::server(stream, addr)
-            }
-        );
+        let resolver = MockResolver::new(SocketAddrs::from_iter(addrs.into_iter()));
+
+        let config = TcpTransportConfig::default();
+        let transport = TcpTransport::new(resolver, config.into());
+
+        let (conn, _): (TcpStream, TcpStream) = connect_transport(transport, listener).await;
 
         let info = conn.info();
         assert_eq!(
@@ -627,13 +699,16 @@ mod test {
     async fn test_simple_transport() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        let bind = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = bind.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
         let config = TcpTransportConfig::default();
-        let transport = SimpleTcpTransport::new(config);
+        let transport = SimpleTcpTransport::new(
+            MockResolver::new(SocketAddrs::from(listener.local_addr().unwrap())),
+            config,
+        );
 
-        let (conn, _) = connect_transport(bind.local_addr().unwrap(), transport, bind).await;
+        let (conn, _) = connect_transport(transport, listener).await;
 
         let info = conn.info();
         assert_eq!(

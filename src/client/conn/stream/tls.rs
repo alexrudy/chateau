@@ -11,6 +11,7 @@ use rustls::ClientConfig;
 use std::net::ToSocketAddrs;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::client::pool::PoolableStream;
 use crate::info::TlsConnectionInfo;
 use crate::info::tls::HasTlsConnectionInfo;
 use crate::info::{ConnectionInfo, HasConnectionInfo};
@@ -89,13 +90,19 @@ where
     IO::Addr: Clone,
 {
     /// Create a new TLS stream from the given IO, with a domain name and TLS configuration.
-    pub fn new(stream: IO, domain: &str, config: Arc<ClientConfig>) -> Self {
-        let domain = rustls::pki_types::ServerName::try_from(domain)
+    pub fn new(stream: IO, hostname: &str, config: Arc<ClientConfig>) -> Self {
+        let server_name = rustls::pki_types::ServerName::try_from(hostname)
             .expect("should be valid dns name")
             .to_owned();
 
-        let connect = tokio_rustls::TlsConnector::from(config).connect(domain, stream);
-        Self::from(connect)
+        let info = stream.info();
+        let connect = tokio_rustls::TlsConnector::from(config).connect(server_name, stream);
+
+        Self {
+            state: State::Handshake(Box::new(connect)),
+            info,
+            tls: None,
+        }
     }
 }
 
@@ -145,20 +152,18 @@ where
     }
 }
 
-impl<IO> From<tokio_rustls::Connect<IO>> for TlsStream<IO>
+impl<IO> PoolableStream for TlsStream<IO>
 where
-    IO: HasConnectionInfo,
-    IO::Addr: Clone,
+    IO: HasConnectionInfo + PoolableStream,
+    IO::Addr: Unpin,
 {
-    fn from(accept: tokio_rustls::Connect<IO>) -> Self {
-        let stream = accept.get_ref().expect("tls connect should have stream");
-
-        let info = stream.info();
-
-        Self {
-            state: State::Handshake(Box::new(accept)),
-            info,
-            tls: None,
+    fn can_share(&self) -> bool {
+        match &self.state {
+            State::Handshake(connect) => connect
+                .get_ref()
+                .map(|stream| stream.can_share())
+                .unwrap_or(false),
+            State::Streaming(tls_stream) => tls_stream.get_ref().0.can_share(),
         }
     }
 }

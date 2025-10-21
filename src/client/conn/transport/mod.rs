@@ -3,11 +3,7 @@
 //! Transports are responsible for establishing a connection to a remote server, shuffling bytes back and forth,
 
 use std::future::Future;
-#[cfg(feature = "tls")]
-use std::sync::Arc;
 
-#[cfg(feature = "tls")]
-use rustls::client::ClientConfig;
 #[cfg(feature = "tls")]
 use thiserror::Error;
 use tower::Service;
@@ -15,9 +11,7 @@ use tower::Service;
 use self::oneshot::Oneshot;
 
 #[cfg(feature = "tls")]
-pub use self::tls::{StaticHostTlsTransport, TlsTransport};
-#[cfg(feature = "tls")]
-use crate::client::default_tls_config;
+pub use self::tls::{StaticHostTlsTransport, TlsRequest, TlsTransport};
 
 use crate::info::HasConnectionInfo;
 
@@ -35,75 +29,55 @@ pub mod unix;
 ///
 /// To implement a transport stream, implement a [`tower::Service`] which accepts an address and returns
 /// an IO stream, which must be compatible with a [`super::Protocol`].
-pub trait Transport<Addr>: Send {
+pub trait Transport<Req> {
     /// The type of IO stream used by this transport
-    type IO: HasConnectionInfo<Addr = Addr> + Send + 'static;
+    type IO: HasConnectionInfo + Send + 'static;
 
     /// Error returned when connection fails
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// The future type returned by this service
-    type Future: Future<Output = Result<Self::IO, <Self as Transport<Addr>>::Error>>
-        + Send
-        + 'static;
+    type Future: Future<Output = Result<Self::IO, <Self as Transport<Req>>::Error>> + Send + 'static;
 
     /// Connect to a remote server and return a stream.
-    fn connect(&mut self, req: Addr) -> <Self as Transport<Addr>>::Future;
+    fn connect(&mut self, req: &Req) -> <Self as Transport<Req>>::Future;
 
     /// Poll the transport to see if it is ready to accept a new connection.
     fn poll_ready(
         &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), <Self as Transport<Addr>>::Error>>;
+    ) -> std::task::Poll<Result<(), <Self as Transport<Req>>::Error>>;
 }
 
-impl<T, IO, Addr> Transport<Addr> for T
+impl<T, IO, Req, F, E> Transport<Req> for T
 where
-    T: Service<Addr, Response = IO>,
+    T: for<'a> Service<&'a Req, Response = IO, Future = F, Error = E>,
     T: Clone + Send + Sync + 'static,
-    T::Error: std::error::Error + Send + Sync + 'static,
-    T::Future: Send + 'static,
-    IO: HasConnectionInfo<Addr = Addr> + Send + 'static,
-    Addr: Send,
+    E: std::error::Error + Send + Sync + 'static,
+    F: Future<Output = Result<IO, E>> + Send + 'static,
+    IO: HasConnectionInfo + Send + 'static,
+    Req: Send,
 {
     type IO = IO;
-    type Error = T::Error;
-    type Future = T::Future;
+    type Error = E;
+    type Future = F;
 
-    fn connect(&mut self, req: Addr) -> <Self as Service<Addr>>::Future {
+    fn connect(&mut self, req: &Req) -> Self::Future {
         self.call(req)
     }
 
     fn poll_ready(
         &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), <Self as Transport<Addr>>::Error>> {
+    ) -> std::task::Poll<Result<(), <Self as Transport<Req>>::Error>> {
         Service::poll_ready(self, cx)
     }
 }
 
 /// Extension trait for Transports to provide additional configuration options.
-pub trait TransportExt<Addr>: Transport<Addr> {
-    #[cfg(feature = "tls")]
-    /// Wrap the transport in a TLS layer.
-    fn with_tls(self, config: Arc<ClientConfig>) -> TlsTransport<Self>
-    where
-        Self: Sized,
-    {
-        TlsTransport::new(self, config)
-    }
-
-    #[cfg(feature = "tls")]
-    /// Wrap the transport in a TLS layer configured with a default client configuration.
-    fn with_default_tls(self) -> TlsTransport<Self>
-    where
-        Self: Sized,
-    {
-        TlsTransport::new(self, default_tls_config().into())
-    }
-
+pub trait TransportExt<Req>: Transport<Req> {
     /// Create a future which uses the given transport to connect after calling poll_ready.
-    fn oneshot(self, request: Addr) -> Oneshot<Self, Addr>
+    fn oneshot(self, request: Req) -> Oneshot<Self, Req>
     where
         Self: Sized,
     {
@@ -111,7 +85,7 @@ pub trait TransportExt<Addr>: Transport<Addr> {
     }
 }
 
-impl<T, Addr> TransportExt<Addr> for T where T: Transport<Addr> {}
+impl<T, Req> TransportExt<Req> for T where T: Transport<Req> {}
 
 /// An error returned when a TLS connection attempt fails
 #[cfg(feature = "tls")]
@@ -142,17 +116,17 @@ mod oneshot {
     use super::Transport;
 
     #[pin_project::pin_project(project=OneshotStateProj)]
-    enum OneshotState<T, A>
+    enum OneshotState<T, R>
     where
-        T: Transport<A>,
+        T: Transport<R>,
     {
-        Pending { transport: T, request: Option<A> },
+        Pending { transport: T, request: Option<R> },
         Ready(#[pin] T::Future),
     }
 
-    impl<T, A> fmt::Debug for OneshotState<T, A>
+    impl<T, R> fmt::Debug for OneshotState<T, R>
     where
-        T: Transport<A>,
+        T: Transport<R>,
     {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -164,19 +138,19 @@ mod oneshot {
 
     #[derive(Debug)]
     #[pin_project::pin_project]
-    pub struct Oneshot<T, A>
+    pub struct Oneshot<T, R>
     where
-        T: Transport<A>,
+        T: Transport<R>,
     {
         #[pin]
-        state: OneshotState<T, A>,
+        state: OneshotState<T, R>,
     }
 
-    impl<T, A> Oneshot<T, A>
+    impl<T, R> Oneshot<T, R>
     where
-        T: Transport<A>,
+        T: Transport<R>,
     {
-        pub fn new(transport: T, request: A) -> Self {
+        pub fn new(transport: T, request: R) -> Self {
             Self {
                 state: OneshotState::Pending {
                     transport,
@@ -186,9 +160,9 @@ mod oneshot {
         }
     }
 
-    impl<T, A> Future for Oneshot<T, A>
+    impl<T, R> Future for Oneshot<T, R>
     where
-        T: Transport<A>,
+        T: Transport<R>,
     {
         type Output = Result<T::IO, T::Error>;
 
@@ -201,7 +175,7 @@ mod oneshot {
                 match this.state.as_mut().project() {
                     OneshotStateProj::Pending { transport, request } => {
                         ready!(transport.poll_ready(cx))?;
-                        let fut = transport.connect(request.take().unwrap());
+                        let fut = transport.connect(request.as_ref().unwrap());
                         this.state.set(OneshotState::Ready(fut));
                     }
                     OneshotStateProj::Ready(fut) => {

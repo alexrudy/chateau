@@ -48,7 +48,6 @@ use super::conn::Connection;
 use super::conn::Connector;
 use super::conn::Protocol;
 use super::conn::Transport;
-use super::conn::dns::Resolver;
 
 /// Error building a key
 #[derive(Debug, thiserror::Error)]
@@ -58,10 +57,20 @@ pub struct KeyError {
     inner: BoxError,
 }
 
+impl KeyError {
+    /// Create a new `KeyError` from an error
+    pub fn new<E>(err: E) -> Self
+    where
+        E: Into<BoxError>,
+    {
+        Self { inner: err.into() }
+    }
+}
+
 /// Key which links an address and request to a connection.
 pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
     /// Build a pool key from an address and request
-    fn build(request: &R) -> Result<Self, KeyError>
+    fn build_key(request: &R) -> Result<Self, KeyError>
     where
         Self: Sized;
 }
@@ -154,23 +163,20 @@ where
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
     #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
-    pub(crate) fn checkout<D, T, P>(
+    pub(crate) fn checkout<T, P>(
         &self,
         key: K,
         multiplex: bool,
-        connector: Connector<D, T, P, R>,
-    ) -> Checkout<D, T, P, R>
+        connector: Connector<T, P, R>,
+    ) -> Checkout<T, P, R>
     where
-        D: Resolver<R> + Send + 'static,
-        D::Address: Send,
-        D::Future: Send,
-        T: Transport<D::Address>,
+        T: Transport<R> + Send,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
         C: PoolableConnection<R>,
     {
         let mut inner = self.inner.lock();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut connector: Option<Connector<D, T, P, R>> = Some(connector);
+        let mut connector: Option<Connector<T, P, R>> = Some(connector);
         let token = self.keys.lock().insert(key);
 
         if let Some(connection) = inner.pop(token) {
@@ -708,7 +714,7 @@ mod tests {
     struct MockKey;
 
     impl super::Key<MockRequest> for MockKey {
-        fn build(_: &MockRequest) -> Result<Self, KeyError>
+        fn build_key(_: &MockRequest) -> Result<Self, KeyError>
         where
             Self: Sized,
         {

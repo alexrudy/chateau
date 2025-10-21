@@ -16,8 +16,42 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::trace;
 
-use crate::info::HasConnectionInfo;
+use crate::info::{HasConnectionInfo, UnixAddr};
 use crate::stream::unix::UnixStream;
+
+/// A request to a unix transport
+#[derive(Debug, Clone)]
+pub struct UnixRequest<R> {
+    request: R,
+    address: UnixAddr,
+}
+
+impl<R> UnixRequest<R> {
+    /// Create a new UnixRequest, binding the request object and the address.
+    pub fn new(request: R, address: UnixAddr) -> Self {
+        Self { request, address }
+    }
+
+    /// Access the request
+    pub fn request(&self) -> &R {
+        &self.request
+    }
+
+    /// Access the address
+    pub fn address(&self) -> &UnixAddr {
+        &self.address
+    }
+
+    /// Consumes the request, returning the request.
+    pub fn into_request(self) -> R {
+        self.request
+    }
+
+    /// Consumes the request, returning the request and address.
+    pub fn into_parts(self) -> (R, UnixAddr) {
+        (self.request, self.address)
+    }
+}
 
 /// A Unix Domain Socket connector for client connections.
 ///
@@ -68,7 +102,7 @@ impl<IO> UnixTransport<IO> {
 
 type BoxFuture<'a, T, E> = crate::BoxFuture<'a, Result<T, E>>;
 
-impl<IO> tower::Service<PathBuf> for UnixTransport<IO>
+impl<IO, R> tower::Service<UnixRequest<R>> for UnixTransport<IO>
 where
     UnixStream: Into<IO>,
     IO: HasConnectionInfo + AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -82,13 +116,15 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: PathBuf) -> Self::Future {
+    fn call(&mut self, req: UnixRequest<R>) -> Self::Future {
         let config = self.config.clone();
+        let (_, address) = req.into_parts();
 
         Box::pin(async move {
-            let stream = connect_unix_socket(&req, config.connect_timeout).await?;
+            let path = address.path().ok_or(UnixConnectionError::UnnamedAddress)?;
+            let stream = connect_unix_socket(path, config.connect_timeout).await?;
 
-            trace!(path = %req.display(), "unix socket connected");
+            trace!(path = %path.display(), "unix socket connected");
 
             let stream = stream.into();
             Ok(stream)
@@ -211,7 +247,7 @@ impl<IO> StaticAddressUnixTransport<IO> {
     }
 }
 
-impl<IO> tower::Service<()> for StaticAddressUnixTransport<IO>
+impl<IO, R> tower::Service<R> for StaticAddressUnixTransport<IO>
 where
     UnixStream: Into<IO>,
     IO: HasConnectionInfo + AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -225,7 +261,7 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _req: ()) -> Self::Future {
+    fn call(&mut self, _req: R) -> Self::Future {
         let address = self.address.clone();
         let config = self.config.clone();
 

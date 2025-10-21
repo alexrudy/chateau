@@ -18,6 +18,8 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio::net::TcpListener;
 
+#[cfg(feature = "client")]
+use crate::client::pool::PoolableStream;
 use crate::info::HasConnectionInfo;
 #[cfg(feature = "server")]
 use crate::server::Accept;
@@ -176,6 +178,13 @@ impl HasConnectionInfo for TcpStream {
                 .expect("local_addr is available for stream"),
             remote_addr,
         }
+    }
+}
+
+#[cfg(feature = "client")]
+impl PoolableStream for TcpStream {
+    fn can_share(&self) -> bool {
+        false
     }
 }
 
