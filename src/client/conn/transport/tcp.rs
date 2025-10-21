@@ -167,12 +167,12 @@ impl TcpTransportConfig {
             ));
         }
 
-        TcpConnecting::new(addrs, &self)
+        TcpConnecting::new(addrs, self)
     }
 
     /// Connect to a single address
     async fn connect_to_addr(&self, addr: SocketAddr) -> Result<TcpStream, TcpConnectionError> {
-        let connect = connect(&addr, self.connect_timeout, &self)?;
+        let connect = connect(&addr, self.connect_timeout, self)?;
         connect
             .await
             .map_err(TcpConnectionError::msg("tcp connect error"))
