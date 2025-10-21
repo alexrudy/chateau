@@ -113,6 +113,11 @@ impl<R> TcpTransport<R> {
     pub fn config(&self) -> &TcpTransportConfig {
         &self.config
     }
+
+    /// Mutable, copy-on-write access to the TCP Transport configuration
+    pub fn config_mut(&mut self) -> &mut TcpTransportConfig {
+        Arc::make_mut(&mut self.config)
+    }
 }
 
 type BoxFuture<'a, T, E> = crate::BoxFuture<'a, Result<T, E>>;
