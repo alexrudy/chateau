@@ -80,7 +80,8 @@ pub trait TlsHandshakeStream {
 
 #[cfg(feature = "server")]
 /// A stream which can provide information about the TLS handshake.
-pub(crate) trait TlsHandshakeInfo: TlsHandshakeStream {
+pub trait TlsHandshakeInfo: TlsHandshakeStream {
+    /// Receive TLS connection info from the handshake.
     fn recv(&self) -> TlsConnectionInfoReceiver;
 }
 
