@@ -6,13 +6,14 @@
 //! unencrypted connections.
 
 use std::future::Future;
-use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::{fmt, io};
 
 pub use crate::info::TlsConnectionInfo;
 #[cfg(feature = "server")]
 use crate::info::tls::TlsConnectionInfoReceiver;
+use crate::info::{ConnectionInfo, HasConnectionInfo, HasTlsConnectionInfo};
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -124,6 +125,35 @@ where
         match self {
             OptTlsStream::NoTls(_) => TlsConnectionInfoReceiver::empty(),
             OptTlsStream::Tls(stream) => stream.recv(),
+        }
+    }
+}
+
+impl<Tls, NoTls, A> HasConnectionInfo for OptTlsStream<Tls, NoTls>
+where
+    A: fmt::Debug + fmt::Display + Send + 'static,
+    Tls: HasConnectionInfo<Addr = A>,
+    NoTls: HasConnectionInfo<Addr = A>,
+{
+    type Addr = A;
+    fn info(&self) -> ConnectionInfo<A> {
+        match self {
+            OptTlsStream::NoTls(stream) => stream.info(),
+            OptTlsStream::Tls(stream) => stream.info(),
+        }
+    }
+}
+
+impl<Tls, NoTls, A> HasTlsConnectionInfo for OptTlsStream<Tls, NoTls>
+where
+    A: fmt::Debug + fmt::Display + Send + 'static,
+    Tls: HasConnectionInfo<Addr = A> + HasTlsConnectionInfo,
+    NoTls: HasConnectionInfo<Addr = A>,
+{
+    fn tls_info(&self) -> Option<&TlsConnectionInfo> {
+        match self {
+            OptTlsStream::NoTls(_) => None,
+            OptTlsStream::Tls(stream) => stream.tls_info(),
         }
     }
 }

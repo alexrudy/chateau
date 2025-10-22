@@ -86,16 +86,6 @@ pub trait HasTlsConnectionInfo: HasConnectionInfo {
     fn tls_info(&self) -> Option<&TlsConnectionInfo>;
 }
 
-#[cfg(not(feature = "tls"))]
-impl<T> HasTlsConnectionInfo for T
-where
-    T: HasConnectionInfo,
-{
-    fn tls_info(&self) -> Option<&TlsConnectionInfo> {
-        None
-    }
-}
-
 #[cfg(feature = "server")]
 mod channel {
     use std::{

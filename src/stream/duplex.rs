@@ -37,7 +37,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "client")]
 use crate::client::pool::PoolableStream;
 
-use crate::info::{self, HasConnectionInfo};
+use crate::info::{self, HasConnectionInfo, HasTlsConnectionInfo};
 
 #[cfg(feature = "server")]
 use crate::server::conn::Accept;
@@ -83,6 +83,12 @@ impl HasConnectionInfo for DuplexStream {
 
     fn info(&self) -> ConnectionInfo {
         self.info.clone()
+    }
+}
+
+impl HasTlsConnectionInfo for DuplexStream {
+    fn tls_info(&self) -> Option<&info::TlsConnectionInfo> {
+        None
     }
 }
 

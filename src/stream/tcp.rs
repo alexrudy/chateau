@@ -21,6 +21,7 @@ pub use tokio::net::TcpListener;
 #[cfg(feature = "client")]
 use crate::client::pool::PoolableStream;
 use crate::info::HasConnectionInfo;
+use crate::info::HasTlsConnectionInfo;
 #[cfg(feature = "server")]
 use crate::server::Accept;
 
@@ -178,6 +179,12 @@ impl HasConnectionInfo for TcpStream {
                 .expect("local_addr is available for stream"),
             remote_addr,
         }
+    }
+}
+
+impl HasTlsConnectionInfo for TcpStream {
+    fn tls_info(&self) -> Option<&super::tls::TlsConnectionInfo> {
+        None
     }
 }
 

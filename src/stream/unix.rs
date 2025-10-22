@@ -22,6 +22,7 @@ pub use tokio::net::UnixListener;
 #[cfg(feature = "client")]
 use crate::client::pool::PoolableStream;
 use crate::info::HasConnectionInfo;
+use crate::info::HasTlsConnectionInfo;
 #[cfg(feature = "server")]
 use crate::server::Accept;
 
@@ -176,6 +177,12 @@ impl HasConnectionInfo for UnixStream {
             local_addr,
             remote_addr,
         }
+    }
+}
+
+impl HasTlsConnectionInfo for UnixStream {
+    fn tls_info(&self) -> Option<&crate::info::TlsConnectionInfo> {
+        None
     }
 }
 

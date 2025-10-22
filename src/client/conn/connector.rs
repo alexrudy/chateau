@@ -127,7 +127,7 @@ where
 }
 
 /// A connector combines the futures required to connect to a transport
-/// and then complete the transport's associated startup handshake.
+/// and then complete the protocol's associated startup handshake.
 #[pin_project]
 pub struct Connector<T, P, R>
 where
