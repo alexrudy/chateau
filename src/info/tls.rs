@@ -133,6 +133,7 @@ mod channel {
     }
 
     impl TlsConnectionInfoReceiver {
+        /// Create an empty TLS Connection Info (for non-tls backed streams)
         pub fn empty() -> Self {
             Self {
                 state: Arc::new(RwLock::new(State::Empty)),
