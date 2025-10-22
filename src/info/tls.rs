@@ -133,7 +133,7 @@ mod channel {
     }
 
     impl TlsConnectionInfoReceiver {
-        pub(crate) fn empty() -> Self {
+        pub fn empty() -> Self {
             Self {
                 state: Arc::new(RwLock::new(State::Empty)),
             }
