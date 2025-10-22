@@ -4,10 +4,8 @@
 
 use super::HasConnectionInfo;
 
-#[cfg(feature = "server")]
-pub(crate) use self::channel::TlsConnectionInfoReceiver;
-#[cfg(feature = "server")]
-pub(crate) use self::channel::{TlsConnectionInfoSender, channel};
+#[cfg(all(feature = "server", feature = "tls"))]
+pub(crate) use self::channel::{TlsConnectionInfoReceiver, TlsConnectionInfoSender, channel};
 
 /// Information about a TLS connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,6 +21,7 @@ pub struct TlsConnectionInfo {
     pub alpn: Option<String>,
 }
 
+#[cfg(feature = "tls")]
 impl TlsConnectionInfo {
     /// Create a new TLS connection info for a server connection.
     pub fn server(server_info: &rustls::ServerConnection) -> Self {
@@ -86,7 +85,7 @@ pub trait HasTlsConnectionInfo: HasConnectionInfo {
     fn tls_info(&self) -> Option<&TlsConnectionInfo>;
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "tls"))]
 mod channel {
     use std::{
         ops::{Deref, DerefMut},
@@ -175,7 +174,7 @@ mod channel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tls"))]
 mod tests {
     use crate::fixtures;
     use std::sync::Arc;

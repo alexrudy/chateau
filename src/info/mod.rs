@@ -2,11 +2,8 @@
 
 use std::fmt;
 
-#[cfg(feature = "tls")]
 pub mod tls;
-#[cfg(feature = "tls")]
 pub use self::tls::HasTlsConnectionInfo;
-#[cfg(feature = "tls")]
 pub use self::tls::TlsConnectionInfo;
 #[cfg(feature = "duplex")]
 #[doc(hidden)]

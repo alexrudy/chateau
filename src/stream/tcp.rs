@@ -183,7 +183,7 @@ impl HasConnectionInfo for TcpStream {
 }
 
 impl HasTlsConnectionInfo for TcpStream {
-    fn tls_info(&self) -> Option<&super::tls::TlsConnectionInfo> {
+    fn tls_info(&self) -> Option<&crate::info::TlsConnectionInfo> {
         None
     }
 }
