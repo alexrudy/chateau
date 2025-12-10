@@ -147,7 +147,7 @@ where
                 let addrs = resolve
                     .await
                     .map_err(TcpConnectionError::msg("resolving"))?;
-                let stream = config.connecting(addrs).connect().await?;
+                let stream = config.connect(addrs).await?;
 
                 if let Ok(peer_addr) = stream.peer_addr() {
                     trace!(peer.addr = %peer_addr, "tcp connected");
@@ -159,109 +159,6 @@ where
             }
             .instrument(span),
         )
-    }
-}
-
-impl TcpTransportConfig {
-    /// Create a new `TcpConnecting` future.
-    fn connecting(&self, mut addrs: SocketAddrs) -> TcpConnecting<'_> {
-        if self.happy_eyeballs_timeout.is_some() {
-            addrs.sort_preferred(IpVersion::from_binding(
-                self.local_address_ipv4,
-                self.local_address_ipv6,
-            ));
-        }
-
-        TcpConnecting::new(addrs, self)
-    }
-
-    /// Connect to a single address
-    async fn connect_to_addr(&self, addr: SocketAddr) -> Result<TcpStream, TcpConnectionError> {
-        let connect = connect(&addr, self.connect_timeout, self)?;
-        connect
-            .await
-            .map_err(TcpConnectionError::msg("tcp connect error"))
-    }
-}
-
-/// Establish a TCP connection to a set of addresses with a given config.
-///
-/// This is a low-level method which allows for library-level re-use of things like the happy-eyeballs algorithm
-/// and connection attempt management.
-pub async fn connect_to_addrs<A>(
-    config: &TcpTransportConfig,
-    addrs: A,
-) -> Result<TcpStream, TcpConnectionError>
-where
-    A: IntoIterator<Item = SocketAddr>,
-{
-    let mut addrs = SocketAddrs::from_iter(addrs);
-    if config.happy_eyeballs_timeout.is_some() {
-        addrs.sort_preferred(IpVersion::from_binding(
-            config.local_address_ipv4,
-            config.local_address_ipv6,
-        ));
-    }
-
-    let connecting = TcpConnecting::new(addrs, config);
-    connecting.connect().await
-}
-
-/// Future which implements the happy eyeballs algorithm for connecting to a remote address.
-///
-/// This follows the algorithm described in [RFC8305](https://tools.ietf.org/html/rfc8305),
-/// which allows for faster connection times by trying multiple addresses in parallel,
-/// regardless of whether they are IPv4 or IPv6.
-pub(crate) struct TcpConnecting<'c> {
-    addresses: SocketAddrs,
-    config: &'c TcpTransportConfig,
-}
-
-impl<'c> TcpConnecting<'c> {
-    /// Create a new `TcpConnecting` future.
-    pub(crate) fn new(addresses: SocketAddrs, config: &'c TcpTransportConfig) -> Self {
-        Self { addresses, config }
-    }
-
-    /// Connect to the remote address using the happy eyeballs algorithm.
-    async fn connect(mut self) -> Result<TcpStream, TcpConnectionError> {
-        let delay = if self.addresses.is_empty() {
-            self.config.happy_eyeballs_timeout
-        } else {
-            self.config
-                .happy_eyeballs_timeout
-                .map(|duration| duration / (self.addresses.len()) as u32)
-        };
-
-        tracing::trace!(?delay, timeout=?self.config.happy_eyeballs_timeout, "happy eyeballs");
-        let mut attempts = EyeballSet::new(
-            delay,
-            self.config.happy_eyeballs_timeout,
-            self.config.happy_eyeballs_concurrency,
-        );
-
-        while let Some(address) = self.addresses.pop() {
-            let span: tracing::Span = tracing::trace_span!("connect", %address);
-            let attempt = TcpConnectionAttempt::new(address, self.config);
-            attempts.push(async { attempt.connect().instrument(span).await });
-        }
-
-        tracing::trace!("Starting {} connection attempts", attempts.len());
-
-        attempts.finish().await.map_err(|err| match err {
-            HappyEyeballsError::Error(err) => err,
-            HappyEyeballsError::Timeout(elapsed) => {
-                tracing::trace!("tcp timed out after {}ms", elapsed.as_millis());
-                TcpConnectionError::new(format!(
-                    "Connection attempts timed out after {}ms",
-                    elapsed.as_millis()
-                ))
-            }
-            HappyEyeballsError::NoProgress => {
-                tracing::trace!("tcp exhausted connection candidates");
-                TcpConnectionError::new("Exhausted connection candidates")
-            }
-        })
     }
 }
 
@@ -412,6 +309,69 @@ impl Default for TcpTransportConfig {
     }
 }
 
+impl TcpTransportConfig {
+    /// Connect via TCP using the happy eyeballs algorithm
+    ///
+    /// This uses the happy eyeballs algorithm to connect to the first address
+    /// that succeeds, prefering the IP address version which matches the socket
+    /// binding address when provided.
+    pub async fn connect(&self, mut addrs: SocketAddrs) -> Result<TcpStream, TcpConnectionError> {
+        if self.happy_eyeballs_timeout.is_some() {
+            addrs.sort_preferred(IpVersion::from_binding(
+                self.local_address_ipv4,
+                self.local_address_ipv6,
+            ));
+        }
+
+        let delay = if addrs.is_empty() {
+            self.happy_eyeballs_timeout
+        } else {
+            self.happy_eyeballs_timeout
+                .map(|duration| duration / (addrs.len()) as u32)
+        };
+
+        tracing::trace!(?delay, timeout=?self.happy_eyeballs_timeout, "happy eyeballs");
+        let mut attempts = EyeballSet::new(
+            delay,
+            self.happy_eyeballs_timeout,
+            self.happy_eyeballs_concurrency,
+        );
+
+        while let Some(address) = addrs.pop() {
+            let span: tracing::Span = tracing::trace_span!("connect", %address);
+            let attempt = TcpConnectionAttempt::new(address, self);
+            attempts.push(async { attempt.connect().instrument(span).await });
+        }
+
+        tracing::trace!("Starting {} connection attempts", attempts.len());
+
+        attempts.finish().await.map_err(|err| match err {
+            HappyEyeballsError::Error(err) => err,
+            HappyEyeballsError::Timeout(elapsed) => {
+                tracing::trace!("tcp timed out after {}ms", elapsed.as_millis());
+                TcpConnectionError::new(format!(
+                    "Connection attempts timed out after {}ms",
+                    elapsed.as_millis()
+                ))
+            }
+            HappyEyeballsError::NoProgress => {
+                tracing::trace!("tcp exhausted connection candidates");
+                TcpConnectionError::new("Exhausted connection candidates")
+            }
+        })
+    }
+
+    /// Connect to a single address.
+    ///
+    /// Prefer the [TcpTransportConfig::connect] method when you have multiple addresses available, as they can be raced.
+    pub async fn connect_to_addr(&self, addr: SocketAddr) -> Result<TcpStream, TcpConnectionError> {
+        let connect = connect(&addr, self.connect_timeout, self)?;
+        connect
+            .await
+            .map_err(TcpConnectionError::msg("tcp connect error"))
+    }
+}
+
 /// A simple TCP transport that uses a single connection attempt.
 pub struct SimpleTcpTransport<R> {
     resolver: R,
@@ -527,58 +487,57 @@ pub(crate) fn connect(
         .map_err(TcpConnectionError::msg("tcp open error"))?;
     tracing::trace!("tcp socket opened");
 
-    let guard = tracing::trace_span!("socket::options").entered();
+    let socket = tracing::trace_span!("socket::options").in_scope(|| {
+        // When constructing a Tokio `TcpSocket` from a raw fd/socket, the user is
+        // responsible for ensuring O_NONBLOCK is set.
+        socket
+            .set_nonblocking(true)
+            .map_err(TcpConnectionError::msg("tcp set_nonblocking error"))?;
 
-    // When constructing a Tokio `TcpSocket` from a raw fd/socket, the user is
-    // responsible for ensuring O_NONBLOCK is set.
-    socket
-        .set_nonblocking(true)
-        .map_err(TcpConnectionError::msg("tcp set_nonblocking error"))?;
-
-    if let Some(dur) = config.keep_alive_timeout {
-        let conf = TcpKeepalive::new().with_time(dur);
-        if let Err(e) = socket.set_tcp_keepalive(&conf) {
-            warn!("tcp set_keepalive error: {}", e);
+        if let Some(dur) = config.keep_alive_timeout {
+            let conf = TcpKeepalive::new().with_time(dur);
+            if let Err(e) = socket.set_tcp_keepalive(&conf) {
+                warn!("tcp set_keepalive error: {}", e);
+            }
         }
-    }
 
-    bind_local_address(
-        &socket,
-        addr,
-        &config.local_address_ipv4,
-        &config.local_address_ipv6,
-    )
-    .map_err(TcpConnectionError::msg("tcp bind local address"))?;
+        bind_local_address(
+            &socket,
+            addr,
+            &config.local_address_ipv4,
+            &config.local_address_ipv6,
+        )
+        .map_err(TcpConnectionError::msg("tcp bind local address"))?;
 
-    #[allow(unsafe_code)]
-    let socket = unsafe {
-        // Safety: `from_raw_fd` is only safe to call if ownership of the raw
-        // file descriptor is transferred. Since we call `into_raw_fd` on the
-        // socket2 socket, it gives up ownership of the fd and will not close
-        // it, so this is safe.
-        use std::os::unix::io::{FromRawFd, IntoRawFd};
-        TcpSocket::from_raw_fd(socket.into_raw_fd())
-    };
+        #[allow(unsafe_code)]
+        let socket = unsafe {
+            // Safety: `from_raw_fd` is only safe to call if ownership of the raw
+            // file descriptor is transferred. Since we call `into_raw_fd` on the
+            // socket2 socket, it gives up ownership of the fd and will not close
+            // it, so this is safe.
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            TcpSocket::from_raw_fd(socket.into_raw_fd())
+        };
 
-    if config.reuse_address {
-        if let Err(e) = socket.set_reuseaddr(true) {
-            warn!("tcp set_reuse_address error: {}", e);
+        if config.reuse_address {
+            if let Err(e) = socket.set_reuseaddr(true) {
+                warn!("tcp set_reuse_address error: {}", e);
+            }
         }
-    }
 
-    if let Some(size) = config.send_buffer_size {
-        if let Err(e) = socket.set_send_buffer_size(size.try_into().unwrap_or(u32::MAX)) {
-            warn!("tcp set_buffer_size error: {}", e);
+        if let Some(size) = config.send_buffer_size {
+            if let Err(e) = socket.set_send_buffer_size(size.try_into().unwrap_or(u32::MAX)) {
+                warn!("tcp set_buffer_size error: {}", e);
+            }
         }
-    }
 
-    if let Some(size) = config.recv_buffer_size {
-        if let Err(e) = socket.set_recv_buffer_size(size.try_into().unwrap_or(u32::MAX)) {
-            warn!("tcp set_recv_buffer_size error: {}", e);
+        if let Some(size) = config.recv_buffer_size {
+            if let Err(e) = socket.set_recv_buffer_size(size.try_into().unwrap_or(u32::MAX)) {
+                warn!("tcp set_recv_buffer_size error: {}", e);
+            }
         }
-    }
-
-    drop(guard);
+        Ok::<_, TcpConnectionError>(socket)
+    })?;
 
     let span = tracing::trace_span!("socket::connect", remote.addr = %addr);
     let connect = socket.connect(*addr).instrument(span);
