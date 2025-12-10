@@ -139,7 +139,7 @@ checksum = "9555578bc9e57714c812a1f84e4fc5b4d21fcb063490c624de019f7464c91268"
 
 [[package]]
 name = "chateau"
-version = "0.2.0-rc1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "parking_lot",
