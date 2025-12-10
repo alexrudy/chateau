@@ -1,4 +1,43 @@
-//! Serving components
+//! Components to build up servers
+//!
+//! The [`Server`] is the primary entry point - it builds up a tower-based
+//! server from a few components.
+//!
+//! ## Accepting Connections
+//!
+//! The [`Accept`] trait defines how to listen for and accept connections
+//! to the server. For a TCP server, this is a TCP listener which produces
+//! TCP connections. Notably, the [`Accept`] trait does not contain the logic
+//! to spawn individual connections, and instead passes connections serially
+//! through the server. Spawning simultaneous connections is handled farther
+//! down the stack by the executor.
+//!
+//! Connections produced by [`Accept`] should be roughly "dumb" - they should be
+//! pipes through which the server can push bytes, and not aware of the request
+//! and reply format handled by the server at a higher level - e.g. [`Accept`]
+//! doesn't know how to speak HTTP.
+//!
+//! ## Communication Protocol
+//!
+//! The [`Protocol`] is the part that transforms requests and responses into bytes
+//! that are sent over the transport.
+//!
+//! ## A "Make-Service" to handle requests
+//!
+//! Tower has the concept of a "Make Service" – a [`tower::Service`] that returns other
+//! [`tower::Service`]'s. Each request is then handled by a single [`tower::Service`]
+//! returned from the "Make Service".
+//!
+//! The simplest "Make Service" just clones a service for each request. See
+//! [`SharedService`][crate::services::SharedService].
+//!
+//! More complicated "Make Services" might limit service / request processing concurrency
+//! or provide timeouts. Check out [tower] for more meta-services.
+//!
+//! ## The Executor
+//!
+//! This is the component for spawning each connection onto a runtime and monitoring that
+//! task, ensuring it gets driven to completion.
 
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -90,6 +129,22 @@ impl<A, P, S, R, E> Server<A, P, S, R, E> {
     }
 
     /// Shutdown the server gracefully when the given future resolves.
+    ///
+    /// Graceful shutdown will request that individual connections shut down,
+    /// and then block until all connections have been dropped. Some protocols
+    /// do not support any sort of graceful shutdown, in which case the connection
+    /// will end up polled to completion and closed before the server stops.
+    ///
+    /// The `signal` is a future that will be polled - when the future resolves,
+    /// the graceful shutdown will be triggered.
+    ///
+    /// This method changes the server type to `GracefulShutdown`, which implements
+    /// the [Future] trait but does not include any of the other builder methods - therefore,
+    /// it must be called after all of the other builder methods have been called to configure
+    /// the server.
+    ///
+    /// To serve connections without gracefull shutdowns, simply await [Server], it implmenets
+    /// [IntoFuture] when fully configured.
     pub fn with_graceful_shutdown<F>(self, signal: F) -> GracefulShutdown<A, P, S, R, E, F>
     where
         S: MakeServiceRef<A::Connection, R>,
