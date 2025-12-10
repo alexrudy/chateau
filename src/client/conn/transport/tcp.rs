@@ -372,6 +372,27 @@ impl TcpTransportConfig {
     }
 }
 
+/// Establish a TCP connection to a set of addresses with a given config.
+///
+/// This is a low-level method which allows for library-level re-use of things like the happy-eyeballs algorithm
+/// and connection attempt management.
+pub async fn connect_to_addrs<A>(
+    config: &TcpTransportConfig,
+    addrs: A,
+) -> Result<TcpStream, TcpConnectionError>
+where
+    A: IntoIterator<Item = SocketAddr>,
+{
+    let mut addrs = SocketAddrs::from_iter(addrs);
+    if config.happy_eyeballs_timeout.is_some() {
+        addrs.sort_preferred(IpVersion::from_binding(
+            config.local_address_ipv4,
+            config.local_address_ipv6,
+        ));
+    }
+
+    config.connect(addrs).await
+}
 /// A simple TCP transport that uses a single connection attempt.
 pub struct SimpleTcpTransport<R> {
     resolver: R,
