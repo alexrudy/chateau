@@ -6,7 +6,7 @@
 //!
 //! ## Architecture Overview
 //!
-//! Chateau is designed around Tower's `Service` trait, extending it with networking-specific
+//! Chateau is designed around Tower's [Service][tower::Service] trait, extending it with networking-specific
 //! abstractions that separate concerns between transport, protocol, and business logic layers.
 //! The library provides two main components: clients and servers, both built on similar
 //! architectural principles.
