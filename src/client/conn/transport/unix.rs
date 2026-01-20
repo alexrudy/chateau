@@ -142,15 +142,19 @@ async fn connect_unix_socket<P: AsRef<Path>>(
     match connect_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, connect_future).await {
             Ok(Ok(stream)) => Ok(stream),
-            Ok(Err(e)) => Err(UnixConnectionError::ConnectionError(e)),
+            Ok(Err(error)) => {
+                trace!(kind=%error.kind(), "unix connection error: {error}");
+                Err(UnixConnectionError::ConnectionError(error))
+            }
             Err(_) => {
                 trace!(timeout=?timeout, "unix connection timed out");
                 Err(UnixConnectionError::Timeout(timeout))
             }
         },
-        None => connect_future
-            .await
-            .map_err(UnixConnectionError::ConnectionError),
+        None => connect_future.await.map_err(|error| {
+            trace!(kind=%error.kind(), "unix connection error: {error}");
+            UnixConnectionError::ConnectionError(error)
+        }),
     }
 }
 
@@ -266,7 +270,13 @@ where
         let config = self.config.clone();
 
         Box::pin(async move {
-            let stream = connect_unix_socket(&address, config.connect_timeout).await?;
+            trace!(path = %address.display(), "unix socket connecting");
+
+            let stream = connect_unix_socket(&address, config.connect_timeout)
+                .await
+                .inspect_err(|error| {
+                    trace!(path = %address.display(), "unix socket connection error: {error}");
+                })?;
 
             trace!(path = %address.display(), "unix socket connected to static address");
 
