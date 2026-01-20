@@ -75,6 +75,29 @@ pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
         Self: Sized;
 }
 
+use meta::PoolId;
+
+mod meta {
+    use core::fmt;
+
+    static POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct PoolId(pub(super) usize);
+
+    impl PoolId {
+        pub(super) fn new() -> Self {
+            PoolId(POOL_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl fmt::Display for PoolId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "pool-{}", self.0)
+        }
+    }
+}
+
 /// A pool of connections to remote hosts.
 ///
 /// The pool makes use of a `Checkout` to represent a connection that is being checked out of the pool. The `Checkout`
@@ -97,6 +120,8 @@ where
     // NOTE: The token map is stored on the Pool, not the PoolInner so that the generic K argument doesn't
     // propogate into the pool inner and reference, only the connection type propogates.
     keys: Arc<Mutex<TokenMap<K>>>,
+
+    id: PoolId,
 }
 
 impl<C, R, K> Clone for Pool<C, R, K>
@@ -109,6 +134,7 @@ where
         Self {
             inner: self.inner.clone(),
             keys: self.keys.clone(),
+            id: self.id,
         }
     }
 }
@@ -120,9 +146,11 @@ where
     K: Key<R>,
 {
     pub(crate) fn new(config: Config) -> Self {
+        let id = PoolId::new();
         Self {
-            inner: Arc::new(Mutex::new(PoolInner::new(config))),
+            inner: Arc::new(Mutex::new(PoolInner::new(config, id))),
             keys: Arc::new(Mutex::new(TokenMap::default())),
+            id,
         }
     }
 
@@ -162,7 +190,7 @@ where
     /// 4. During the connection phase, if a new connection is returned to the pool, it will be returned
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
-    #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
+    #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key, pool.id=%self.id), level="debug"))]
     pub(crate) fn checkout<T, P>(
         &self,
         key: K,
@@ -326,6 +354,8 @@ where
     waiting: HashMap<Token, VecDeque<Sender<Pooled<C, R>>>>,
 
     idle: HashMap<Token, IdleConnections<C, R>>,
+
+    id: PoolId,
 }
 
 impl<C, R> PoolInner<C, R>
@@ -333,19 +363,20 @@ where
     C: PoolableConnection<R>,
     R: Send + 'static,
 {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, id: PoolId) -> Self {
         Self {
             config,
             connecting: HashSet::new(),
             waiting: HashMap::new(),
             idle: HashMap::new(),
+            id,
         }
     }
 
     pub(in crate::client) fn cancel_connection(&mut self, token: Token) {
         let existed = self.connecting.remove(&token);
         if existed {
-            trace!("pending connection cancelled");
+            trace!(pool.id=%self.id, ?token, "pending connection cancelled");
         }
     }
 }
@@ -371,6 +402,8 @@ where
 {
     fn push(&mut self, token: Token, mut connection: C, pool_ref: PoolRef<C, R>) {
         self.connecting.remove(&token);
+
+        let _span = tracing::trace_span!("pool::push", pool.id=%self.id).entered();
 
         if let Some(waiters) = self.waiting.get_mut(&token) {
             trace!(waiters=%waiters.len(), ?token, "walking waiters");
@@ -422,11 +455,12 @@ where
         let mut empty = false;
         let mut idle_entry = None;
 
-        tracing::trace!(?token, "pop");
+        let _span = tracing::trace_span!("pool::pop", pool.id=%self.id).entered();
 
         if let Some(idle) = self.idle.get_mut(&token) {
             idle_entry = idle.pop(self.config.idle_timeout);
             empty = idle.is_empty();
+            tracing::trace!(?token, "pop entry");
         }
 
         if empty && !idle_entry.as_ref().map(|i| i.can_share()).unwrap_or(false) {
@@ -671,7 +705,7 @@ where
         {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(()),
             std::task::Poll::Ready(Err(err)) => {
-                tracing::trace!(error = %err, "Connection errored while polling for readiness");
+                tracing::trace!(error = %err, "connection errored while polling for readiness");
                 std::task::Poll::Ready(())
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -688,7 +722,7 @@ where
         if let Some(connection) = self.connection.take() {
             if connection.is_open() && !self.token.is_zero() {
                 if let Some(mut pool) = self.pool.lock() {
-                    trace!("open connection returned to pool");
+                    trace!(%pool.id, "open connection returned to pool");
                     pool.push(self.token, connection, self.pool.clone());
                 }
             }
