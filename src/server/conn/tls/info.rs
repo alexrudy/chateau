@@ -156,7 +156,7 @@ where
         let inner = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, inner);
 
-        let span = tracing::info_span!("TLS");
+        let span = tracing::trace_span!("TLS");
 
         let fut = async move {
             async {
