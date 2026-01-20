@@ -47,7 +47,7 @@ use std::future::{Ready, ready};
 use std::hash::Hash;
 use std::io;
 use std::marker::PhantomData;
-use std::pin::{Pin, pin};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker, ready};
