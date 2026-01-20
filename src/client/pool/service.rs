@@ -23,7 +23,7 @@ use super::PoolableStream;
 pub struct ConnectionPoolLayer<T, P, R, K> {
     transport: T,
     protocol: P,
-    pool: Option<pool::Config>,
+    pool: Option<pool::ConnectionManagerConfig>,
     _body: std::marker::PhantomData<fn(R, K) -> ()>,
 }
 
@@ -49,13 +49,13 @@ impl<T, P, R, K> ConnectionPoolLayer<T, P, R, K> {
     }
 
     /// Set the connection pool configuration.
-    pub fn with_pool(mut self, pool: pool::Config) -> Self {
+    pub fn with_pool(mut self, pool: pool::ConnectionManagerConfig) -> Self {
         self.pool = Some(pool);
         self
     }
 
     /// Set the connection pool configuration to an optional value.
-    pub fn with_optional_pool(mut self, pool: Option<pool::Config>) -> Self {
+    pub fn with_optional_pool(mut self, pool: Option<pool::ConnectionManagerConfig>) -> Self {
         self.pool = pool;
         self
     }
@@ -138,7 +138,7 @@ where
     K: pool::Key<R>,
 {
     /// Create a new client with the given transport, protocol, and pool configuration.
-    pub fn new(transport: T, protocol: P, service: S, pool: pool::Config) -> Self {
+    pub fn new(transport: T, protocol: P, service: S, pool: pool::ConnectionManagerConfig) -> Self {
         Self {
             transport,
             protocol,

@@ -19,11 +19,10 @@ use crate::client::conn::connector::{Connector, ConnectorMeta};
 
 #[cfg(debug_assertions)]
 use self::ids::CheckoutId;
-use super::Config;
-use super::PoolRef;
+use super::ManagerRef;
 use super::PoolableConnection;
 use super::Pooled;
-use super::key::Token;
+use super::manager::ConnectionManagerConfig;
 
 #[cfg(debug_assertions)]
 mod ids {
@@ -62,8 +61,8 @@ where
     /// not starting its own connection.
     Connecting(#[pin] Receiver<Pooled<C, B>>),
 
-    /// There is no pool for connections to wait for.
-    NoPool,
+    /// There is no manager for connections to wait for.
+    Nomanager,
 }
 
 impl<C, B> Waiting<C, B>
@@ -79,10 +78,10 @@ where
             Waiting::Connecting(rx) => {
                 rx.close();
             }
-            Waiting::NoPool => {}
+            Waiting::Nomanager => {}
         }
 
-        *self = Waiting::NoPool;
+        *self = Waiting::Nomanager;
     }
 }
 
@@ -95,7 +94,7 @@ where
         match self {
             Waiting::Idle(_) => f.debug_tuple("Idle").finish(),
             Waiting::Connecting(_) => f.debug_tuple("Connecting").finish(),
-            Waiting::NoPool => f.debug_tuple("NoPool").finish(),
+            Waiting::Nomanager => f.debug_tuple("Nomanager").finish(),
         }
     }
 }
@@ -129,11 +128,11 @@ where
                 Poll::Ready(Err(_)) => Poll::Ready(WaitingPoll::Closed),
                 Poll::Pending => Poll::Pending,
             },
-            WaitingProjected::NoPool => Poll::Ready(WaitingPoll::Closed),
+            WaitingProjected::Nomanager => Poll::Ready(WaitingPoll::Closed),
         };
 
         if polled.is_ready() {
-            self.as_mut().set(Waiting::NoPool);
+            self.as_mut().set(Waiting::Nomanager);
         };
 
         polled
@@ -181,16 +180,16 @@ where
     }
 }
 
+/// A checkout of a connection from a connection manager.
 #[pin_project(PinnedDrop)]
-pub(crate) struct Checkout<T, P, R>
+pub struct Checkout<T, P, R>
 where
     T: Transport<R> + Send + 'static,
     P: Protocol<T::IO, R> + Send + 'static,
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
 {
-    token: Token,
-    pool: PoolRef<P::Connection, R>,
+    manager: ManagerRef<P::Connection, R>,
     #[pin]
     waiter: Waiting<P::Connection, R>,
     #[pin]
@@ -211,8 +210,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Checkout")
-            .field("token", &self.token)
-            .field("pool", &self.pool)
+            .field("manager", &self.manager)
             .field("waiter", &self.waiter)
             .field("inner", &self.inner)
             .finish()
@@ -234,9 +232,8 @@ where
             CheckoutConnectingProj::ConnectingWithDelayDrop(connector) if connector.is_some() => {
                 tracing::trace!("converting checkout to delayed drop");
                 Some(Checkout {
-                    token: *this.token,
-                    pool: this.pool.clone(),
-                    waiter: Waiting::NoPool,
+                    manager: this.manager.clone(),
+                    waiter: Waiting::Nomanager,
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
                     request: None,
                     connection: None,
@@ -249,11 +246,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn token(&self) -> Token {
-        self.token
-    }
-
     pub(crate) fn take_request_pinned(mut self: Pin<&mut Self>) -> R {
         self.as_mut()
             .project()
@@ -262,7 +254,7 @@ where
             .expect("request is available")
     }
 
-    /// Constructs a checkout which does not hold a reference to the pool
+    /// Constructs a checkout which does not hold a reference to the manager
     /// and so is only waiting on the connector.
     ///
     /// This checkout will always proceed with the connector, uninterrupted by
@@ -270,8 +262,8 @@ where
     /// procedure to finish connections if dropped.
     ///
     /// This is useful when using a checkout to poll a connection to readiness
-    /// without a pool, or in a context in which the associated connection cannot
-    /// or should not be shared with the pool.
+    /// without a manager, or in a context in which the associated connection cannot
+    /// or should not be shared with the manager.
     pub(crate) fn detached(connector: Connector<T, P, R>) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
@@ -280,9 +272,8 @@ where
         tracing::trace!(%id, "creating detached checkout");
 
         Self {
-            token: Token::zero(),
-            pool: PoolRef::none(),
-            waiter: Waiting::NoPool,
+            manager: ManagerRef::none(),
+            waiter: Waiting::Nomanager,
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             request: None,
             connection: None,
@@ -293,26 +284,24 @@ where
     }
 
     pub(super) fn new(
-        token: Token,
-        pool: PoolRef<P::Connection, R>,
+        manager: ManagerRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
         connect: Option<Connector<T, P, R>>,
         connection: Option<P::Connection>,
         request: Option<R>,
-        config: &Config,
+        config: &ConnectionManagerConfig,
     ) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
         let meta = ConnectorMeta::new();
 
         #[cfg(debug_assertions)]
-        tracing::trace!(?token, %id, "creating new checkout");
+        tracing::trace!( %id, "creating new checkout");
 
         if connection.is_some() {
-            tracing::trace!(?token, "connection recieved from pool");
+            tracing::trace!("connection recieved from manager");
             Self {
-                token,
-                pool,
+                manager: manager,
                 waiter: Waiting::Idle(waiter),
                 inner: InnerCheckoutConnecting::Connected,
                 request: request.or(connect.map(|mut c| c.take_request_unpinned())),
@@ -322,7 +311,7 @@ where
                 id,
             }
         } else if let Some(connector) = connect {
-            tracing::trace!(?token, "connecting to pool");
+            tracing::trace!("connecting to manager");
 
             let inner = if config.continue_after_preemption {
                 InnerCheckoutConnecting::ConnectingWithDelayDrop(Some(Box::pin(connector)))
@@ -331,8 +320,7 @@ where
             };
 
             Self {
-                token,
-                pool,
+                manager: manager,
                 waiter: Waiting::Idle(waiter),
                 inner,
                 request,
@@ -342,10 +330,9 @@ where
                 id,
             }
         } else {
-            tracing::trace!(?token, "waiting for connection");
+            tracing::trace!("waiting for connection");
             Self {
-                token,
-                pool,
+                manager: manager,
                 waiter: Waiting::Connecting(waiter),
                 inner: InnerCheckoutConnecting::Waiting,
                 request,
@@ -377,14 +364,14 @@ where
         {
             // Outcomes from .poll_waiter:
             // - Ready(Some(connection)) => return connection
-            // - Ready(None) => continue to check pool, we don't have a waiter.
-            // - Pending => wait on the waiter to complete, don't bother to check pool.
+            // - Ready(None) => continue to check manager, we don't have a waiter.
+            // - Pending => wait on the waiter to complete, don't bother to check manager.
 
-            // Open questions: Should we check the pool for a different connection when the
-            // waiter is pending? Probably not, ideally our semantics should keep the pool
+            // Open questions: Should we check the manager for a different connection when the
+            // waiter is pending? Probably not, ideally our semantics should keep the manager
             // from containing multiple connections if they can be multiplexed.
             if let WaitingPoll::Connected(connection) = ready!(this.waiter.as_mut().poll(cx)) {
-                debug!(token=?this.token, "connection recieved from waiter");
+                debug!("connection recieved from waiter");
 
                 match this.inner.as_mut().project() {
                     CheckoutConnectingProj::ConnectingWithDelayDrop(Some(connector))
@@ -399,7 +386,7 @@ where
             }
         }
 
-        trace!(token=?this.token, "polling for new connection");
+        trace!("polling for new connection");
         // Try to connect while we also wait for a checkout to be ready.
 
         match this.inner.as_mut().project() {
@@ -418,20 +405,18 @@ where
 
                 this.waiter.close();
                 this.inner.set(InnerCheckoutConnecting::Connected);
-                Poll::Ready(Ok(register_connected(this.pool, *this.token, connection)))
+                Poll::Ready(Ok(register_connected(this.manager, connection)))
             }
             CheckoutConnectingProj::Connecting(connector) => {
                 let result = ready!(connector.as_mut().poll_connector(
                     {
-                        let pool = this.pool.clone();
-                        let token = *this.token;
+                        let manager = this.manager.clone();
                         move || {
                             trace!(
-                                ?token,
-                                "connection can be shared, telling pool to wait for handshake"
+                                "connection can be shared, telling manager to wait for handshake"
                             );
-                            if let Some(mut pool) = pool.lock() {
-                                pool.connected_in_handshake(token);
+                            if let Some(mut manager) = manager.lock() {
+                                manager.connected_in_handshake();
                             }
                         }
                     },
@@ -444,9 +429,7 @@ where
                 this.inner.set(InnerCheckoutConnecting::Connected);
 
                 match result {
-                    Ok(connection) => {
-                        Poll::Ready(Ok(register_connected(this.pool, *this.token, connection)))
-                    }
+                    Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
                     Err(e) => Poll::Ready(Err(e)),
                 }
             }
@@ -454,15 +437,13 @@ where
             | CheckoutConnectingProj::ConnectingDelayed(connector) => {
                 let result = ready!(connector.as_mut().poll_connector(
                     {
-                        let pool = this.pool.clone();
-                        let token = *this.token;
+                        let manager = this.manager.clone();
                         move || {
                             trace!(
-                                ?token,
-                                "connection can be shared, telling pool to wait for handshake"
+                                "connection can be shared, telling manager to wait for handshake"
                             );
-                            if let Some(mut pool) = pool.lock() {
-                                pool.connected_in_handshake(token);
+                            if let Some(mut manager) = manager.lock() {
+                                manager.connected_in_handshake();
                             }
                         }
                     },
@@ -475,9 +456,7 @@ where
                 this.inner.set(InnerCheckoutConnecting::Connected);
 
                 match result {
-                    Ok(connection) => {
-                        Poll::Ready(Ok(register_connected(this.pool, *this.token, connection)))
-                    }
+                    Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
                     Err(e) => Poll::Ready(Err(e)),
                 }
             }
@@ -489,41 +468,34 @@ where
     }
 }
 
-/// Register a connection with the pool referenced here.
-fn register_connected<C, B>(
-    poolref: &PoolRef<C, B>,
-    token: Token,
-    mut connection: C,
-) -> Pooled<C, B>
+/// Register a connection with the manager referenced here.
+fn register_connected<C, B>(managerref: &ManagerRef<C, B>, mut connection: C) -> Pooled<C, B>
 where
     C: PoolableConnection<B>,
     B: Send + 'static,
 {
-    if let Some(mut pool) = poolref.lock() {
+    if let Some(mut manager) = managerref.lock() {
         if let Some(reused) = connection.reuse() {
-            pool.push(token, reused, poolref.clone());
+            manager.push(reused, managerref);
             return Pooled {
                 connection: Some(connection),
-                token: Token::zero(),
-                pool: PoolRef::none(),
+                manager: ManagerRef::none(),
             };
         } else {
             return Pooled {
                 connection: Some(connection),
-                token,
-                pool: poolref.clone(),
+                manager: managerref.clone(),
             };
         }
     }
 
-    // No pool or lock was available, so we can't add the connection to the pool.
+    // No manager or lock was available, so we can't add the connection to the manager.
     //
-    // Returning the original poolref + token means that if this was temporary,
-    // and we can grab the pool later, we will do so.
+    // Returning the original managerref + token means that if this was temporary,
+    // and we can grab the manager later, we will do so.
     Pooled {
         connection: Some(connection),
-        token,
-        pool: poolref.clone(),
+        manager: managerref.clone(),
     }
 }
 
@@ -545,9 +517,9 @@ where
                     tracing::error!(error=%err, "error during delayed drop");
                 }
             });
-        } else if let Some(mut pool) = self.pool.lock() {
+        } else if let Some(mut manager) = self.manager.lock() {
             // Connection is only cancled when no delayed drop occurs.
-            pool.cancel_connection(self.token);
+            manager.cancel_connection();
         }
     }
 }
@@ -583,13 +555,12 @@ mod test {
 
         let checkout = Checkout::detached(transport.connector(MockRequest));
 
-        assert!(checkout.token.is_zero());
-        assert!(checkout.pool.is_none());
+        assert!(checkout.manager.is_none());
         assert!(matches!(
             checkout.inner,
             InnerCheckoutConnecting::Connecting(_)
         ));
-        assert!(matches!(checkout.waiter, Waiting::NoPool));
+        assert!(matches!(checkout.waiter, Waiting::Nomanager));
 
         let dbg = format!("{checkout:?}");
         assert!(dbg.starts_with("Checkout { "));

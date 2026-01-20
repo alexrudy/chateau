@@ -15,26 +15,21 @@
 //! and the maximum number of idle connections per host.
 
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use std::time::Duration;
-
-use parking_lot::ArcMutexGuard;
 use parking_lot::Mutex;
-use tokio::sync::oneshot::Sender;
 use tracing::trace;
 
 mod checkout;
 mod idle;
 mod key;
+pub mod lock;
+pub mod manager;
 pub(super) mod service;
-mod weakopt;
 
 use crate::BoxError;
 
@@ -42,7 +37,10 @@ pub(super) use self::checkout::Checkout;
 use self::idle::IdleConnections;
 pub(super) use self::key::Token;
 use self::key::TokenMap;
-use self::weakopt::WeakOpt;
+use self::lock::ArcMutex;
+use self::lock::WeakMutex;
+use self::manager::ConnectionManager;
+use self::manager::ConnectionManagerConfig;
 
 use super::conn::Connection;
 use super::conn::Connector;
@@ -75,29 +73,6 @@ pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
         Self: Sized;
 }
 
-use meta::PoolId;
-
-mod meta {
-    use core::fmt;
-
-    static POOL_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) struct PoolId(pub(super) usize);
-
-    impl PoolId {
-        pub(super) fn new() -> Self {
-            PoolId(POOL_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
-        }
-    }
-
-    impl fmt::Display for PoolId {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "pool-{}", self.0)
-        }
-    }
-}
-
 /// A pool of connections to remote hosts.
 ///
 /// The pool makes use of a `Checkout` to represent a connection that is being checked out of the pool. The `Checkout`
@@ -120,8 +95,6 @@ where
     // NOTE: The token map is stored on the Pool, not the PoolInner so that the generic K argument doesn't
     // propogate into the pool inner and reference, only the connection type propogates.
     keys: Arc<Mutex<TokenMap<K>>>,
-
-    id: PoolId,
 }
 
 impl<C, R, K> Clone for Pool<C, R, K>
@@ -134,7 +107,6 @@ where
         Self {
             inner: self.inner.clone(),
             keys: self.keys.clone(),
-            id: self.id,
         }
     }
 }
@@ -145,18 +117,10 @@ where
     C: PoolableConnection<R>,
     K: Key<R>,
 {
-    pub(crate) fn new(config: Config) -> Self {
-        let id = PoolId::new();
+    pub(crate) fn new(config: ConnectionManagerConfig) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(PoolInner::new(config, id))),
+            inner: Arc::new(Mutex::new(PoolInner::new(config))),
             keys: Arc::new(Mutex::new(TokenMap::default())),
-            id,
-        }
-    }
-
-    pub(in crate::client) fn as_ref(&self) -> PoolRef<C, R> {
-        PoolRef {
-            inner: WeakOpt::downgrade(&self.inner),
         }
     }
 }
@@ -168,7 +132,7 @@ where
     K: Key<R>,
 {
     fn default() -> Self {
-        Self::new(Config::default())
+        Self::new(ConnectionManagerConfig::default())
     }
 }
 
@@ -190,7 +154,7 @@ where
     /// 4. During the connection phase, if a new connection is returned to the pool, it will be returned
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
-    #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key, pool.id=%self.id), level="debug"))]
+    #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
     pub(crate) fn checkout<T, P>(
         &self,
         key: K,
@@ -202,143 +166,17 @@ where
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
         C: PoolableConnection<R>,
     {
-        let mut inner = self.inner.lock();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut connector: Option<Connector<T, P, R>> = Some(connector);
         let token = self.keys.lock().insert(key);
 
-        if let Some(connection) = inner.pop(token) {
-            trace!("connection found in pool");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            return Checkout::new(
-                token,
-                self.as_ref(),
-                rx,
-                connector,
-                Some(connection),
-                request,
-                &inner.config,
-            );
-        }
+        let mut inner = self.inner.lock();
+        let config = inner.config.clone();
+        let mut manager = inner
+            .connections
+            .entry(token)
+            .or_insert_with(|| ConnectionManager::new(config))
+            .lock();
 
-        trace!("checkout interested in pooled connections");
-        inner.waiting.entry(token).or_default().push_back(tx);
-
-        if inner.connecting.contains(&token) {
-            trace!("connection in progress elsewhere, will wait");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            Checkout::new(
-                token,
-                self.as_ref(),
-                rx,
-                connector,
-                None,
-                request,
-                &inner.config,
-            )
-        } else {
-            if multiplex {
-                // Only block new connection attempts if we can multiplex on this one.
-                trace!("checkout of multiplexed connection, other connections should wait");
-                inner.connecting.insert(token);
-            }
-            trace!("connecting to host");
-            Checkout::new(
-                token,
-                self.as_ref(),
-                rx,
-                connector,
-                None,
-                None,
-                &inner.config,
-            )
-        }
-    }
-}
-
-pub(in crate::client) struct PoolRef<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    inner: WeakOpt<Mutex<PoolInner<C, R>>>,
-}
-
-impl<C, R> fmt::Debug for PoolRef<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PoolRef").field(&self.inner).finish()
-    }
-}
-
-impl<C, R> PoolRef<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    pub(in crate::client) fn none() -> Self {
-        Self {
-            inner: WeakOpt::none(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::client) fn try_lock(&self) -> Option<PoolGuard<C, R>> {
-        self.inner
-            .upgrade()
-            .and_then(|inner| inner.try_lock_arc().map(PoolGuard))
-    }
-
-    pub(in crate::client) fn lock(&self) -> Option<PoolGuard<C, R>> {
-        self.inner
-            .upgrade()
-            .map(|inner| PoolGuard(inner.lock_arc()))
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::client) fn is_none(&self) -> bool {
-        self.inner.is_none()
-    }
-}
-
-impl<C, R> Clone for PoolRef<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-pub(in crate::client) struct PoolGuard<C: PoolableConnection<R>, R: Send + 'static>(
-    ArcMutexGuard<parking_lot::RawMutex, PoolInner<C, R>>,
-);
-
-impl<C, R> Deref for PoolGuard<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    type Target = PoolInner<C, R>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<C, R> DerefMut for PoolGuard<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        ConnectionManager::checkout(&mut manager, connector, multiplex)
     }
 }
 
@@ -348,14 +186,8 @@ where
     C: PoolableConnection<R>,
     R: Send + 'static,
 {
-    config: Config,
-
-    connecting: HashSet<Token>,
-    waiting: HashMap<Token, VecDeque<Sender<Pooled<C, R>>>>,
-
-    idle: HashMap<Token, IdleConnections<C, R>>,
-
-    id: PoolId,
+    config: Arc<ConnectionManagerConfig>,
+    connections: HashMap<Token, ArcMutex<ConnectionManager<C, R>>>,
 }
 
 impl<C, R> PoolInner<C, R>
@@ -363,135 +195,10 @@ where
     C: PoolableConnection<R>,
     R: Send + 'static,
 {
-    fn new(config: Config, id: PoolId) -> Self {
+    fn new(config: ConnectionManagerConfig) -> Self {
         Self {
-            config,
-            connecting: HashSet::new(),
-            waiting: HashMap::new(),
-            idle: HashMap::new(),
-            id,
-        }
-    }
-
-    pub(in crate::client) fn cancel_connection(&mut self, token: Token) {
-        let existed = self.connecting.remove(&token);
-        if existed {
-            trace!(pool.id=%self.id, ?token, "pending connection cancelled");
-        }
-    }
-}
-
-impl<C, R> PoolInner<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    /// Mark a connection as connected, but not done with the handshake.
-    ///
-    /// New connection attempts will wait for this connection to complete the
-    /// handshake and re-use it if possible.
-    pub(in crate::client) fn connected_in_handshake(&mut self, token: Token) {
-        self.connecting.insert(token);
-    }
-}
-
-impl<C, R> PoolInner<C, R>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    fn push(&mut self, token: Token, mut connection: C, pool_ref: PoolRef<C, R>) {
-        self.connecting.remove(&token);
-
-        let _span = tracing::trace_span!("pool::push", pool.id=%self.id).entered();
-
-        if let Some(waiters) = self.waiting.get_mut(&token) {
-            trace!(waiters=%waiters.len(), ?token, "walking waiters");
-
-            while let Some(waiter) = waiters.pop_front() {
-                if waiter.is_closed() {
-                    trace!("skipping closed waiter");
-                    continue;
-                }
-
-                if let Some(conn) = connection.reuse() {
-                    trace!("re-usable connection will be sent to waiter");
-                    let pooled = Pooled {
-                        connection: Some(conn),
-                        token: Token::zero(),
-                        pool: pool_ref.clone(),
-                    };
-
-                    if waiter.send(pooled).is_err() {
-                        trace!("waiter closed, skipping");
-                        continue;
-                    };
-                } else {
-                    trace!(
-                        ?token,
-                        "connection not re-usable, but will be sent to waiter"
-                    );
-                    let pooled = Pooled {
-                        connection: Some(connection),
-                        token,
-                        pool: pool_ref.clone(),
-                    };
-
-                    let Err(pooled) = waiter.send(pooled) else {
-                        trace!("connection sent");
-                        return;
-                    };
-
-                    trace!("waiter closed, continuing");
-                    connection = pooled.take().unwrap();
-                }
-            }
-        }
-
-        self.idle.entry(token).or_default().push(connection);
-    }
-
-    fn pop(&mut self, token: Token) -> Option<C> {
-        let mut empty = false;
-        let mut idle_entry = None;
-
-        let _span = tracing::trace_span!("pool::pop", pool.id=%self.id).entered();
-
-        if let Some(idle) = self.idle.get_mut(&token) {
-            idle_entry = idle.pop(self.config.idle_timeout);
-            empty = idle.is_empty();
-            tracing::trace!(?token, "pop entry");
-        }
-
-        if empty && !idle_entry.as_ref().map(|i| i.can_share()).unwrap_or(false) {
-            trace!(?token, "removing empty idle list");
-            self.idle.remove(&token);
-        }
-
-        idle_entry
-    }
-}
-
-/// Configuration for a connection pool.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct Config {
-    /// The maximum idle duration of a connection.
-    pub idle_timeout: Option<Duration>,
-
-    /// The maximum number of idle connections per host.
-    pub max_idle_per_host: usize,
-
-    /// Should in-progress connections continue after they get pre-empted by a new connection?
-    pub continue_after_preemption: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            idle_timeout: Some(Duration::from_secs(90)),
-            max_idle_per_host: 32,
-            continue_after_preemption: true,
+            config: Arc::new(config),
+            connections: HashMap::new(),
         }
     }
 }
@@ -541,6 +248,8 @@ where
     fn reuse(&mut self) -> Option<Self>;
 }
 
+pub(in crate::client) type ManagerRef<C, R> = WeakMutex<ConnectionManager<C, R>>;
+
 /// Wrapper type for a connection which is managed by a pool.
 ///
 /// This type is used outside of the Pool to ensure that dropped
@@ -552,8 +261,7 @@ where
     R: Send + 'static,
 {
     connection: Option<C>,
-    token: Token,
-    pool: PoolRef<C, R>,
+    manager: ManagerRef<C, R>,
 }
 
 impl<C, R> Pooled<C, R>
@@ -563,12 +271,6 @@ where
 {
     fn take(mut self) -> Option<C> {
         self.connection.take()
-    }
-
-    /// Checks if this connection is being re-used
-    /// by the pool (implying that it is multiplexed)
-    pub fn is_reused(&self) -> bool {
-        self.token.is_zero()
     }
 }
 
@@ -645,8 +347,7 @@ where
     fn reuse(&mut self) -> Option<Self> {
         self.connection.as_mut().unwrap().reuse().map(|c| Pooled {
             connection: Some(c),
-            token: self.token,
-            pool: self.pool.clone(),
+            manager: self.manager.clone(),
         })
     }
 
@@ -669,8 +370,7 @@ where
             if !connection.can_share() {
                 tokio::spawn(WhenReady {
                     connection: Some(connection),
-                    token: self.token,
-                    pool: self.pool.clone(),
+                    pool: self.manager.clone(),
                 });
             }
         }
@@ -685,8 +385,7 @@ where
     R: Send + 'static,
 {
     connection: Option<C>,
-    token: Token,
-    pool: PoolRef<C, R>,
+    pool: ManagerRef<C, R>,
 }
 
 impl<C, R> std::future::Future for WhenReady<C, R>
@@ -720,385 +419,12 @@ where
 {
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
-            if connection.is_open() && !self.token.is_zero() {
+            if connection.is_open() {
                 if let Some(mut pool) = self.pool.lock() {
-                    trace!(%pool.id, "open connection returned to pool");
-                    pool.push(self.token, connection, self.pool.clone());
+                    trace!("open connection returned to pool");
+                    pool.push(connection, &self.pool);
                 }
             }
         }
-    }
-}
-
-#[cfg(all(test, feature = "mock"))]
-mod tests {
-
-    use futures::FutureExt as _;
-    use static_assertions::assert_impl_all;
-
-    use crate::client::conn::transport::mock::MockConnectionError;
-
-    use super::*;
-    use crate::client::conn::connector::Error;
-    use crate::client::conn::protocol::mock::{MockRequest, MockSender};
-    use crate::client::conn::stream::mock::MockStream;
-    use crate::client::conn::transport::mock::MockTransport;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    struct MockKey;
-
-    impl super::Key<MockRequest> for MockKey {
-        fn build_key(_: &MockRequest) -> Result<Self, KeyError>
-        where
-            Self: Sized,
-        {
-            Ok(MockKey)
-        }
-    }
-
-    #[test]
-    fn sensible_config() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let config = Config::default();
-        let pool: Pool<MockSender, MockRequest, MockKey> = Pool::new(config);
-
-        assert!(pool.inner.lock().config.idle_timeout.unwrap() > Duration::from_secs(1));
-        assert!(pool.inner.lock().config.max_idle_per_host > 0);
-        assert!(pool.inner.lock().config.max_idle_per_host < 2048);
-    }
-
-    assert_impl_all!(Pool<MockSender, MockRequest, MockKey>: Clone);
-
-    #[tokio::test]
-    async fn checkout_simple() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let conn = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        let cid = conn.id();
-        drop(conn);
-
-        let conn = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        assert_eq!(conn.id(), cid, "connection should be re-used");
-        conn.close();
-        drop(conn);
-
-        let c2 = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(c2.is_open());
-        assert_ne!(c2.id(), cid, "connection should not be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_multiplex() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let conn = pool
-            .checkout(key, true, MockTransport::reusable().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        let cid = conn.id();
-        drop(conn);
-
-        let conn = pool
-            .checkout(key, true, MockTransport::reusable().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        assert_eq!(conn.id(), cid, "connection should be re-used");
-        conn.close();
-        drop(conn);
-
-        let conn = pool
-            .checkout(key, true, MockTransport::reusable().connector(MockRequest))
-            .await
-            .unwrap();
-        assert!(conn.is_open());
-        assert_ne!(conn.id(), cid, "connection should not be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_multiplex_contended() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-        let key = MockKey;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        let mut checkout_a = std::pin::pin!(pool.checkout(
-            key,
-            true,
-            MockTransport::channel(rx).connector(MockRequest)
-        ));
-
-        assert!(futures::poll!(&mut checkout_a).is_pending());
-
-        let mut checkout_b = std::pin::pin!(pool.checkout(
-            key,
-            true,
-            MockTransport::reusable().connector(MockRequest),
-        ));
-
-        assert!(futures::poll!(&mut checkout_b).is_pending());
-        assert!(tx.send(MockStream::reusable()).is_ok());
-        assert!(futures::poll!(&mut checkout_b).is_pending());
-
-        let conn_a = checkout_a.await.unwrap();
-        assert!(conn_a.is_open());
-
-        let conn_b = checkout_b.await.unwrap();
-        assert!(conn_b.is_open());
-        assert_eq!(conn_b.id(), conn_a.id(), "connection should be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_idle_returned() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let conn = MockSender::single();
-
-        let first_id = conn.id();
-
-        let checkout = pool.checkout(key, false, MockTransport::single().connector(MockRequest));
-
-        let token = checkout.token();
-
-        // Return the connection to the pool, sending it out to the new checkout
-        // that is waiting, cancelling the checkout connect.
-
-        pool.inner.lock().push(token, conn, pool.as_ref());
-
-        let conn = checkout.now_or_never().unwrap().unwrap();
-
-        assert!(conn.is_open());
-        assert_eq!(conn.id(), first_id, "connection should be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_idle_connected() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let conn_first = MockSender::single();
-
-        let first_id = conn_first.id();
-
-        tracing::debug!("Checkout from pool");
-
-        let checkout = pool.checkout(key, false, MockTransport::single().connector(MockRequest));
-
-        let token = checkout.token();
-
-        tracing::debug!("Checking interest");
-
-        // At least one connection should be happening / waiting.
-        assert!(
-            !pool
-                .inner
-                .lock()
-                .waiting
-                .get(&token)
-                .expect("no waiting connections in pool")
-                .is_empty()
-        );
-
-        tracing::debug!("Resolving checkout");
-
-        let conn = checkout.now_or_never().unwrap().unwrap();
-
-        tracing::debug!("Inserting original connection");
-        // Return the connection to the pool, sending it out to the new checkout
-        // that is waiting, cancelling the checkout connect.
-        pool.inner.lock().push(token, conn_first, pool.as_ref());
-
-        assert!(conn.is_open());
-        assert_ne!(conn.id(), first_id, "connection should not be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_drop_pool_err() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let start = pool.checkout(key, true, MockTransport::reusable().connector(MockRequest));
-
-        let checkout = pool.checkout(key, true, MockTransport::reusable().connector(MockRequest));
-
-        drop(start);
-        drop(pool);
-
-        assert!(checkout.now_or_never().unwrap().is_err());
-    }
-
-    #[tokio::test]
-    async fn checkout_drop_pool() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let checkout = pool.checkout(key, true, MockTransport::reusable().connector(MockRequest));
-
-        drop(pool);
-
-        assert!(checkout.now_or_never().unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn checkout_connection_error() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-
-        let key = MockKey;
-
-        let checkout = pool.checkout(key, true, MockTransport::error().connector(MockRequest));
-
-        let outcome = checkout.now_or_never().unwrap();
-        let error = outcome.unwrap_err();
-        assert!(matches!(error, Error::Connecting(MockConnectionError)));
-    }
-
-    #[tokio::test]
-    async fn checkout_pool_cloned() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: false,
-        });
-        let other = pool.clone();
-
-        let key = MockKey;
-
-        let conn = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        let cid = conn.id();
-        drop(conn);
-
-        let conn = other
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        assert_eq!(conn.id(), cid, "connection should be re-used");
-        conn.close();
-        drop(conn);
-
-        let c2 = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(c2.is_open());
-        assert_ne!(c2.id(), cid, "connection should not be re-used");
-    }
-
-    #[tokio::test]
-    async fn checkout_delayed_drop() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let pool = Pool::new(Config {
-            idle_timeout: Some(Duration::from_secs(10)),
-            max_idle_per_host: 5,
-            continue_after_preemption: true,
-        });
-
-        let key = MockKey;
-
-        let conn = pool
-            .checkout(key, false, MockTransport::single().connector(MockRequest))
-            .await
-            .unwrap();
-
-        assert!(conn.is_open());
-        let cid = conn.id();
-
-        let checkout = pool.checkout(key, false, MockTransport::single().connector(MockRequest));
-
-        let token = checkout.token();
-
-        drop(conn);
-        let conn = checkout.await.unwrap();
-        assert!(conn.is_open());
-        assert_eq!(cid, conn.id());
-
-        let inner = pool.inner.lock();
-        let idles = inner.idle.get(&token).unwrap();
-        assert_eq!(idles.len(), 1);
     }
 }

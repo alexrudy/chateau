@@ -11,7 +11,7 @@ use crate::services::SharedService;
 use self::builder::NeedsProtocol;
 use self::builder::NeedsRequest;
 use self::builder::NeedsTransport;
-pub use self::pool::Config as PoolConfig;
+pub use self::pool::manager::ConnectionManagerConfig as PoolConfig;
 pub use self::pool::service::ConnectionPoolLayer;
 pub use self::pool::service::ConnectionPoolService;
 
