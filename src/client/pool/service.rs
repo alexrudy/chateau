@@ -192,7 +192,9 @@ where
         Checkout<T, P, R>,
         ConnectionError<T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>,
     > {
-        let key: K = K::build_key(&request)?;
+        let key: K = K::build_key(&request).inspect_err(|error| {
+            tracing::warn!("failed to build key: {error}");
+        })?;
         let protocol = self.protocol.clone();
         let transport = self.transport.clone();
 
