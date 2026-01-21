@@ -137,7 +137,7 @@ where
     #[pin]
     state: ConnectorState<T, P, R>,
     request: Option<R>,
-    shareable: bool,
+    multiplex: bool,
 }
 
 impl<T, P, R> fmt::Debug for Connector<T, P, R>
@@ -159,17 +159,19 @@ where
 {
     /// Create a new connection from a transport connector and a protocol.
     pub fn new(transport: T, protocol: P, request: R) -> Self {
-        //TODO: Fix this
-        let shareable = false;
-
         Self {
+            multiplex: protocol.multiplex(),
             state: ConnectorState::PollReadyTransport {
                 transport: Some(transport),
                 protocol: Some(protocol),
             },
-            shareable,
             request: Some(request),
         }
+    }
+
+    /// Whether the underlying protocol supports multiplexing.
+    pub fn multiplex(&self) -> bool {
+        self.multiplex
     }
 
     /// Unwrap the connector returning just the inner request while it is pinned
@@ -286,7 +288,7 @@ where
                         .expect("future polled in invalid state: protocol is None")
                         .connect(stream);
 
-                    if *connector_projected.shareable {
+                    if *connector_projected.multiplex {
                         if let Some(notifier) = notifier.take() {
                             notifier();
                         }
@@ -663,7 +665,7 @@ mod tests {
 
             let connector = Connector::new(transport, protocol, request);
 
-            assert!(!connector.shareable);
+            assert!(!connector.multiplex);
             assert!(connector.request.is_some());
         }
 

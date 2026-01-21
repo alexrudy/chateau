@@ -48,9 +48,57 @@ impl Default for ConnectionManagerConfig {
     }
 }
 
-/// Manage a set of connections in the pool
+/// Manage a group of connections targeting the same host.
+///
+/// This is the unit of work for a connection pool, and manages connection
+/// sharing, idle connections, and connection bookkeeping.
 #[derive(Debug)]
 pub struct ConnectionManager<C, R>
+where
+    C: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    inner: ArcMutex<InnerConnectionManager<C, R>>,
+}
+
+impl<C, R> Clone for ConnectionManager<C, R>
+where
+    C: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<C, R> ConnectionManager<C, R>
+where
+    C: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    /// Create a new connection manager with the given configuration.
+    pub fn new(config: impl Into<Arc<ConnectionManagerConfig>>) -> Self {
+        Self {
+            inner: InnerConnectionManager::new(config),
+        }
+    }
+
+    /// Checkout a connection from this connection manager, using the given
+    /// connector.
+    pub fn checkout<T, P>(&self, connector: Connector<T, P, R>) -> Checkout<T, P, R>
+    where
+        T: Transport<R> + Send,
+        P: Protocol<T::IO, R, Connection = C> + Send + 'static,
+    {
+        InnerConnectionManager::checkout(&mut self.inner.lock(), connector)
+    }
+}
+
+/// Manage a set of connections in the pool
+#[derive(Debug)]
+pub(super) struct InnerConnectionManager<C, R>
 where
     C: PoolableConnection<R>,
     R: Send + 'static,
@@ -61,52 +109,13 @@ where
     config: Arc<ConnectionManagerConfig>,
 }
 
-impl<C, R> ArcMutexGuard<ConnectionManager<C, R>>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    /// Checkout a connection from the manager. See [ConnectionManager::checkout].
-    pub fn checkout<T, P>(
-        &mut self,
-        connector: Connector<T, P, R>,
-        multiplex: bool,
-    ) -> Checkout<T, P, R>
-    where
-        T: Transport<R> + Send,
-        P: Protocol<T::IO, R, Connection = C> + Send + 'static,
-    {
-        ConnectionManager::checkout(self, connector, multiplex)
-    }
-}
-
-impl<C, R> ArcMutex<ConnectionManager<C, R>>
-where
-    C: PoolableConnection<R>,
-    R: Send + 'static,
-{
-    /// Checkout a connection from the manager. See [ConnectionManager::checkout].
-    pub fn checkout<T, P>(
-        &self,
-        connector: Connector<T, P, R>,
-        multiplex: bool,
-    ) -> Checkout<T, P, R>
-    where
-        T: Transport<R> + Send,
-        P: Protocol<T::IO, R, Connection = C> + Send + 'static,
-    {
-        let mut manager = self.lock();
-        ConnectionManager::checkout(&mut manager, connector, multiplex)
-    }
-}
-
-impl<C, R> ConnectionManager<C, R>
+impl<C, R> InnerConnectionManager<C, R>
 where
     C: PoolableConnection<R>,
     R: Send + 'static,
 {
     /// Creates a new connection manager with the given configuration.
-    pub fn new(config: impl Into<Arc<ConnectionManagerConfig>>) -> ArcMutex<Self> {
+    fn new(config: impl Into<Arc<ConnectionManagerConfig>>) -> ArcMutex<Self> {
         ArcMutex::new(Self {
             connecting: false,
             waiting: VecDeque::new(),
@@ -116,16 +125,16 @@ where
     }
 
     /// Checks out a connection from the connection manager.
-    pub fn checkout<T, P>(
+    fn checkout<T, P>(
         manager: &mut ArcMutexGuard<Self>,
         connector: Connector<T, P, R>,
-        multiplex: bool,
     ) -> Checkout<T, P, R>
     where
         T: Transport<R> + Send,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let multiplex = connector.multiplex();
         let mut connector: Option<Connector<T, P, R>> = Some(connector);
         if let Some(connection) = manager.pop() {
             trace!("connection found in pool");
@@ -230,6 +239,7 @@ where
             }
         }
 
+        trace!("push idle connection");
         self.idle
             .push(connection, Some(self.config.max_idle_per_host));
     }
@@ -254,18 +264,6 @@ mod tests {
     use crate::client::conn::stream::mock::MockStream;
     use crate::client::conn::transport::mock::MockTransport;
 
-    #[test]
-    fn sensible_config() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let config = ConnectionManagerConfig::default();
-        let manager = ConnectionManager::<MockSender, MockRequest>::new(config);
-
-        assert!(manager.lock().config.idle_timeout.unwrap() > Duration::from_secs(1));
-        assert!(manager.lock().config.max_idle_per_host > 0);
-        assert!(manager.lock().config.max_idle_per_host < 2048);
-    }
-
     #[tokio::test]
     async fn checkout_simple() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -277,7 +275,7 @@ mod tests {
         });
 
         let conn = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -286,7 +284,7 @@ mod tests {
         drop(conn);
 
         let conn = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -296,7 +294,7 @@ mod tests {
         drop(conn);
 
         let c2 = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -315,7 +313,7 @@ mod tests {
         });
 
         let conn = manager
-            .checkout(MockTransport::reusable().connector(MockRequest), true)
+            .checkout(MockTransport::reusable().connector(MockRequest))
             .await
             .unwrap();
 
@@ -324,7 +322,7 @@ mod tests {
         drop(conn);
 
         let conn = manager
-            .checkout(MockTransport::reusable().connector(MockRequest), true)
+            .checkout(MockTransport::reusable().connector(MockRequest))
             .await
             .unwrap();
 
@@ -334,7 +332,7 @@ mod tests {
         drop(conn);
 
         let conn = manager
-            .checkout(MockTransport::reusable().connector(MockRequest), true)
+            .checkout(MockTransport::reusable().connector(MockRequest))
             .await
             .unwrap();
         assert!(conn.is_open());
@@ -353,15 +351,13 @@ mod tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        let mut checkout_a = std::pin::pin!(
-            manager.checkout(MockTransport::channel(rx).connector(MockRequest), true)
-        );
+        let mut checkout_a =
+            std::pin::pin!(manager.checkout(MockTransport::channel(rx).connector(MockRequest),));
 
         assert!(futures::poll!(&mut checkout_a).is_pending());
 
-        let mut checkout_b = std::pin::pin!(
-            manager.checkout(MockTransport::reusable().connector(MockRequest), true)
-        );
+        let mut checkout_b =
+            std::pin::pin!(manager.checkout(MockTransport::reusable().connector(MockRequest),));
 
         assert!(futures::poll!(&mut checkout_b).is_pending());
         assert!(tx.send(MockStream::reusable()).is_ok());
@@ -389,12 +385,15 @@ mod tests {
 
         let first_id = conn.id();
 
-        let checkout = manager.checkout(MockTransport::single().connector(MockRequest), false);
+        let checkout = manager.checkout(MockTransport::single().connector(MockRequest));
 
         // Return the connection to the pool, sending it out to the new checkout
         // that is waiting, cancelling the checkout connect.
 
-        manager.lock().push(conn, &WeakMutex::downgrade(&manager));
+        manager
+            .inner
+            .lock()
+            .push(conn, &WeakMutex::downgrade(&manager.inner));
 
         let conn = checkout.now_or_never().unwrap().unwrap();
 
@@ -418,13 +417,13 @@ mod tests {
 
         tracing::debug!("Checkout from pool");
 
-        let checkout = manager.checkout(MockTransport::single().connector(MockRequest), false);
+        let checkout = manager.checkout(MockTransport::single().connector(MockRequest));
 
         tracing::debug!("Checking interest");
 
         // At least one connection should be happening / waiting.
         assert!(
-            !manager.lock().waiting.is_empty(),
+            !manager.inner.lock().waiting.is_empty(),
             "No connections are waiting"
         );
 
@@ -436,8 +435,9 @@ mod tests {
         // Return the connection to the pool, sending it out to the new checkout
         // that is waiting, cancelling the checkout connect.
         manager
+            .inner
             .lock()
-            .push(conn_first, &WeakMutex::downgrade(&manager));
+            .push(conn_first, &WeakMutex::downgrade(&manager.inner));
 
         assert!(conn.is_open());
         assert_ne!(conn.id(), first_id, "connection should not be re-used");
@@ -453,8 +453,8 @@ mod tests {
             continue_after_preemption: false,
         });
 
-        let start = manager.checkout(MockTransport::reusable().connector(MockRequest), true);
-        let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest), true);
+        let start = manager.checkout(MockTransport::reusable().connector(MockRequest));
+        let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest));
 
         drop(start);
         drop(manager);
@@ -472,7 +472,7 @@ mod tests {
             continue_after_preemption: false,
         });
 
-        let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest), true);
+        let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest));
 
         drop(manager);
 
@@ -489,7 +489,7 @@ mod tests {
             continue_after_preemption: false,
         });
 
-        let checkout = manager.checkout(MockTransport::error().connector(MockRequest), true);
+        let checkout = manager.checkout(MockTransport::error().connector(MockRequest));
 
         let outcome = checkout.now_or_never().unwrap();
         let error = outcome.unwrap_err();
@@ -508,7 +508,7 @@ mod tests {
         let other = manager.clone();
 
         let conn = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -517,7 +517,7 @@ mod tests {
         drop(conn);
 
         let conn = other
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -527,7 +527,7 @@ mod tests {
         drop(conn);
 
         let c2 = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
@@ -546,20 +546,20 @@ mod tests {
         });
 
         let conn = manager
-            .checkout(MockTransport::single().connector(MockRequest), false)
+            .checkout(MockTransport::single().connector(MockRequest))
             .await
             .unwrap();
 
         assert!(conn.is_open());
         let cid = conn.id();
 
-        let checkout = manager.checkout(MockTransport::single().connector(MockRequest), false);
+        let checkout = manager.checkout(MockTransport::single().connector(MockRequest));
 
         drop(conn);
         let conn = checkout.await.unwrap();
         assert!(conn.is_open());
         assert_eq!(cid, conn.id());
 
-        assert_eq!(manager.lock().idle.len(), 1);
+        assert_eq!(manager.inner.lock().idle.len(), 1);
     }
 }

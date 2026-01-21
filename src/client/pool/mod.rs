@@ -27,7 +27,7 @@ use tracing::trace;
 mod checkout;
 mod idle;
 mod key;
-pub mod lock;
+mod lock;
 pub mod manager;
 pub(super) mod service;
 
@@ -37,10 +37,10 @@ pub(super) use self::checkout::Checkout;
 use self::idle::IdleConnections;
 pub(super) use self::key::Token;
 use self::key::TokenMap;
-use self::lock::ArcMutex;
 use self::lock::WeakMutex;
 use self::manager::ConnectionManager;
 use self::manager::ConnectionManagerConfig;
+use self::manager::InnerConnectionManager;
 
 use super::conn::Connection;
 use super::conn::Connector;
@@ -155,12 +155,7 @@ where
     /// in place of this one. If `continue_after_preemtion` is `true` in the pool config, the in-progress
     /// connection will continue in the background and be returned to the pool on completion.
     #[cfg_attr(not(tarpaulin), tracing::instrument(skip_all, fields(?key), level="debug"))]
-    pub(crate) fn checkout<T, P>(
-        &self,
-        key: K,
-        multiplex: bool,
-        connector: Connector<T, P, R>,
-    ) -> Checkout<T, P, R>
+    pub(crate) fn checkout<T, P>(&self, key: K, connector: Connector<T, P, R>) -> Checkout<T, P, R>
     where
         T: Transport<R> + Send,
         P: Protocol<T::IO, R, Connection = C> + Send + 'static,
@@ -170,13 +165,12 @@ where
 
         let mut inner = self.inner.lock();
         let config = inner.config.clone();
-        let mut manager = inner
+        let manager = inner
             .connections
             .entry(token)
-            .or_insert_with(|| ConnectionManager::new(config))
-            .lock();
+            .or_insert_with(|| ConnectionManager::new(config));
 
-        ConnectionManager::checkout(&mut manager, connector, multiplex)
+        manager.checkout(connector)
     }
 }
 
@@ -187,7 +181,7 @@ where
     R: Send + 'static,
 {
     config: Arc<ConnectionManagerConfig>,
-    connections: HashMap<Token, ArcMutex<ConnectionManager<C, R>>>,
+    connections: HashMap<Token, ConnectionManager<C, R>>,
 }
 
 impl<C, R> PoolInner<C, R>
@@ -248,7 +242,7 @@ where
     fn reuse(&mut self) -> Option<Self>;
 }
 
-pub(in crate::client) type ManagerRef<C, R> = WeakMutex<ConnectionManager<C, R>>;
+type ManagerRef<C, R> = WeakMutex<InnerConnectionManager<C, R>>;
 
 /// Wrapper type for a connection which is managed by a pool.
 ///

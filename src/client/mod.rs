@@ -14,6 +14,7 @@ use self::builder::NeedsTransport;
 pub use self::pool::manager::ConnectionManagerConfig as PoolConfig;
 pub use self::pool::service::ConnectionPoolLayer;
 pub use self::pool::service::ConnectionPoolService;
+pub use self::pool::service::{ConnectionManagerLayer, ConnectionManagerService};
 
 #[cfg(feature = "tls")]
 /// Get a default TLS client configuration by loading the platform's native certificates.

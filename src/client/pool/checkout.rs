@@ -62,7 +62,7 @@ where
     Connecting(#[pin] Receiver<Pooled<C, B>>),
 
     /// There is no manager for connections to wait for.
-    Nomanager,
+    None,
 }
 
 impl<C, B> Waiting<C, B>
@@ -78,10 +78,10 @@ where
             Waiting::Connecting(rx) => {
                 rx.close();
             }
-            Waiting::Nomanager => {}
+            Waiting::None => {}
         }
 
-        *self = Waiting::Nomanager;
+        *self = Waiting::None;
     }
 }
 
@@ -94,7 +94,7 @@ where
         match self {
             Waiting::Idle(_) => f.debug_tuple("Idle").finish(),
             Waiting::Connecting(_) => f.debug_tuple("Connecting").finish(),
-            Waiting::Nomanager => f.debug_tuple("Nomanager").finish(),
+            Waiting::None => f.debug_tuple("Nomanager").finish(),
         }
     }
 }
@@ -128,11 +128,11 @@ where
                 Poll::Ready(Err(_)) => Poll::Ready(WaitingPoll::Closed),
                 Poll::Pending => Poll::Pending,
             },
-            WaitingProjected::Nomanager => Poll::Ready(WaitingPoll::Closed),
+            WaitingProjected::None => Poll::Ready(WaitingPoll::Closed),
         };
 
         if polled.is_ready() {
-            self.as_mut().set(Waiting::Nomanager);
+            self.as_mut().set(Waiting::None);
         };
 
         polled
@@ -233,7 +233,7 @@ where
                 tracing::trace!("converting checkout to delayed drop");
                 Some(Checkout {
                     manager: this.manager.clone(),
-                    waiter: Waiting::Nomanager,
+                    waiter: Waiting::None,
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
                     request: None,
                     connection: None,
@@ -273,7 +273,7 @@ where
 
         Self {
             manager: ManagerRef::none(),
-            waiter: Waiting::Nomanager,
+            waiter: Waiting::None,
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             request: None,
             connection: None,
@@ -508,18 +508,21 @@ where
     R: Send + 'static,
 {
     fn drop(mut self: Pin<&mut Self>) {
-        #[cfg(debug_assertions)]
-        tracing::trace!(id=%self.id, "drop for checkout");
-
         if let Some(checkout) = self.as_mut().as_delayed() {
+            #[cfg(debug_assertions)]
+            tracing::trace!(id=%self.id, "drop for delayed checkout");
             tokio::task::spawn(async move {
                 if let Err(err) = checkout.await {
                     tracing::error!(error=%err, "error during delayed drop");
                 }
             });
-        } else if let Some(mut manager) = self.manager.lock() {
-            // Connection is only cancled when no delayed drop occurs.
-            manager.cancel_connection();
+        } else {
+            if let Some(mut manager) = self.manager.lock() {
+                // Connection is only cancled when no delayed drop occurs.
+                manager.cancel_connection();
+            }
+            #[cfg(debug_assertions)]
+            tracing::trace!(id=%self.id, "drop for checkout");
         }
     }
 }
@@ -560,7 +563,7 @@ mod test {
             checkout.inner,
             InnerCheckoutConnecting::Connecting(_)
         ));
-        assert!(matches!(checkout.waiter, Waiting::Nomanager));
+        assert!(matches!(checkout.waiter, Waiting::None));
 
         let dbg = format!("{checkout:?}");
         assert!(dbg.starts_with("Checkout { "));
