@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(client)* Split the connection pool to have a connection manager (for a single host), and a pool for many connections.
+- *(chore)* Update dependencies.
+
 ## [0.2.1](https://github.com/alexrudy/chateau/compare/v0.2.0...v0.2.1) - 2025-12-10
 
 ### Added
