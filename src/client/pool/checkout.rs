@@ -301,7 +301,7 @@ where
         if connection.is_some() {
             tracing::trace!("connection recieved from manager");
             Self {
-                manager: manager,
+                manager,
                 waiter: Waiting::Idle(waiter),
                 inner: InnerCheckoutConnecting::Connected,
                 request: request.or(connect.map(|mut c| c.take_request_unpinned())),
@@ -320,7 +320,7 @@ where
             };
 
             Self {
-                manager: manager,
+                manager,
                 waiter: Waiting::Idle(waiter),
                 inner,
                 request,
@@ -332,7 +332,7 @@ where
         } else {
             tracing::trace!("waiting for connection");
             Self {
-                manager: manager,
+                manager,
                 waiter: Waiting::Connecting(waiter),
                 inner: InnerCheckoutConnecting::Waiting,
                 request,

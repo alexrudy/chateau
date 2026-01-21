@@ -136,7 +136,7 @@ impl<T> ArcMutexGuard<T> {
     /// Downgrade the underlying mutex to a weak reference.
     pub fn downgrade(&self) -> WeakMutex<T> {
         WeakMutex {
-            inner: WeakOpt::downgrade(&parking_lot::ArcMutexGuard::mutex(&self.0)),
+            inner: WeakOpt::downgrade(parking_lot::ArcMutexGuard::mutex(&self.0)),
         }
     }
 }
