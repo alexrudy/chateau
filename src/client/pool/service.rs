@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::task::Poll;
 
 use pin_project::pin_project;
@@ -16,6 +17,7 @@ use crate::client::pool::PoolableConnection;
 use crate::client::pool::Pooled;
 
 use super::PoolableStream;
+use super::manager::ConnectionManager;
 
 /// Layer which adds connection pooling and converts
 /// to an inner service which accepts `ExecuteRequest`
@@ -23,7 +25,7 @@ use super::PoolableStream;
 pub struct ConnectionPoolLayer<T, P, R, K> {
     transport: T,
     protocol: P,
-    pool: Option<pool::Config>,
+    pool: Option<pool::ConnectionManagerConfig>,
     _body: std::marker::PhantomData<fn(R, K) -> ()>,
 }
 
@@ -49,13 +51,13 @@ impl<T, P, R, K> ConnectionPoolLayer<T, P, R, K> {
     }
 
     /// Set the connection pool configuration.
-    pub fn with_pool(mut self, pool: pool::Config) -> Self {
+    pub fn with_pool(mut self, pool: pool::ConnectionManagerConfig) -> Self {
         self.pool = Some(pool);
         self
     }
 
     /// Set the connection pool configuration to an optional value.
-    pub fn with_optional_pool(mut self, pool: Option<pool::Config>) -> Self {
+    pub fn with_optional_pool(mut self, pool: Option<pool::ConnectionManagerConfig>) -> Self {
         self.pool = pool;
         self
     }
@@ -138,7 +140,7 @@ where
     K: pool::Key<R>,
 {
     /// Create a new client with the given transport, protocol, and pool configuration.
-    pub fn new(transport: T, protocol: P, service: S, pool: pool::Config) -> Self {
+    pub fn new(transport: T, protocol: P, service: S, pool: pool::ConnectionManagerConfig) -> Self {
         Self {
             transport,
             protocol,
@@ -198,12 +200,11 @@ where
         let protocol = self.protocol.clone();
         let transport = self.transport.clone();
 
-        let multiplex = protocol.multiplex();
         let connector = Connector::new(transport, protocol, request);
 
         if let Some(pool) = self.pool.as_ref() {
             tracing::trace!(?key, "checking out connection");
-            Ok(pool.checkout(key, multiplex, connector))
+            Ok(pool.checkout(key, connector))
         } else {
             tracing::trace!(?key, "detatched connection");
             Ok(Checkout::detached(connector))
@@ -220,6 +221,216 @@ where
     R: Send,
     S: tower::Service<(Pooled<C, R>, R), Response = C::Response> + Clone + Send + 'static,
     K: pool::Key<R>,
+{
+    type Response = C::Response;
+    type Error = ConnectionError<T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>;
+    type Future = ResponseFuture<T, P, C, S, R>;
+
+    fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        match self.connect_to(request) {
+            Ok(checkout) => ResponseFuture::new(checkout, self.service.clone()),
+            Err(error) => ResponseFuture::error(error),
+        }
+    }
+}
+
+/// Layer which adds connection management and converts
+/// to an inner service which accepts `ExecuteRequest`
+/// from an outer service which accepts `http::Request`.
+pub struct ConnectionManagerLayer<T, P, R> {
+    transport: T,
+    protocol: P,
+    manager_config: Option<Arc<pool::ConnectionManagerConfig>>,
+    _body: std::marker::PhantomData<fn(R) -> ()>,
+}
+
+impl<T: fmt::Debug, P: fmt::Debug, R> fmt::Debug for ConnectionManagerLayer<T, P, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionManagerLayer")
+            .field("transport", &self.transport)
+            .field("protocol", &self.protocol)
+            .field("manager", &self.manager_config)
+            .finish()
+    }
+}
+
+impl<T, P, R> ConnectionManagerLayer<T, P, R> {
+    /// Layer for connection pooling.
+    pub fn new(transport: T, protocol: P) -> Self {
+        Self {
+            transport,
+            protocol,
+            manager_config: None,
+            _body: std::marker::PhantomData,
+        }
+    }
+
+    /// Set the connection manager configuration.
+    pub fn with_manager(mut self, manager: pool::ConnectionManagerConfig) -> Self {
+        self.manager_config = Some(Arc::new(manager));
+        self
+    }
+
+    /// Set the connection manager configuration to an optional value.
+    pub fn with_optional_manager(mut self, manager: Option<pool::ConnectionManagerConfig>) -> Self {
+        self.manager_config = manager.map(Arc::new);
+        self
+    }
+
+    /// Disable connection management.
+    pub fn without_pool(mut self) -> Self {
+        self.manager_config = None;
+        self
+    }
+}
+
+impl<T, P, R> Clone for ConnectionManagerLayer<T, P, R>
+where
+    T: Clone,
+    P: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            transport: self.transport.clone(),
+            protocol: self.protocol.clone(),
+            manager_config: self.manager_config.clone(),
+            _body: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, P, S, R> tower::layer::Layer<S> for ConnectionManagerLayer<T, P, R>
+where
+    T: Transport<R> + Clone + Send + Sync + 'static,
+    P: Protocol<T::IO, R> + Clone + Send + Sync + 'static,
+    P::Connection: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    type Service = ConnectionManagerService<T, P, S, R>;
+
+    fn layer(&self, service: S) -> Self::Service {
+        let manager = self
+            .manager_config
+            .clone()
+            .map(pool::ConnectionManager::new);
+
+        ConnectionManagerService {
+            transport: self.transport.clone(),
+            protocol: self.protocol.clone(),
+            service,
+            manager,
+            _body: std::marker::PhantomData,
+        }
+    }
+}
+
+/// A service that manages connections to a single destination using a connection manager.
+///
+/// This is not appropriate for generic clients, as all connections which use this manager
+/// will be treated interchangeably. However, it is appropriate when connected to a single
+/// address (e.g. static routing)
+#[derive(Debug)]
+pub struct ConnectionManagerService<T, P, S, R>
+where
+    T: Transport<R>,
+    P: Protocol<T::IO, R>,
+    P::Connection: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    pub(super) transport: T,
+    pub(super) protocol: P,
+    pub(super) service: S,
+    pub(super) manager: Option<ConnectionManager<P::Connection, R>>,
+    pub(super) _body: std::marker::PhantomData<fn(R)>,
+}
+
+impl<T, P, S, R> ConnectionManagerService<T, P, S, R>
+where
+    T: Transport<R>,
+    P: Protocol<T::IO, R>,
+    P::Connection: PoolableConnection<R>,
+    R: Send + 'static,
+{
+    /// Create a new client with the given transport, protocol, and pool configuration.
+    pub fn new(
+        transport: T,
+        protocol: P,
+        service: S,
+        config: pool::ConnectionManagerConfig,
+    ) -> Self {
+        Self {
+            transport,
+            protocol,
+            service,
+            manager: Some(ConnectionManager::new(config)),
+            _body: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, P, S, R> Clone for ConnectionManagerService<T, P, S, R>
+where
+    T: Transport<R> + Clone,
+    P: Protocol<T::IO, R> + Clone,
+    P::Connection: PoolableConnection<R>,
+    R: Send + 'static,
+    S: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            protocol: self.protocol.clone(),
+            transport: self.transport.clone(),
+            manager: self.manager.clone(),
+            service: self.service.clone(),
+            _body: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, P, S, R> ConnectionManagerService<T, P, S, R>
+where
+    T: Transport<R> + Clone + Send,
+    T::IO: Unpin,
+    P: Protocol<T::IO, R> + Clone + Send + Sync + 'static,
+    <P as Protocol<T::IO, R>>::Connection: PoolableConnection<R> + Send + 'static,
+    R: Send + 'static,
+    S: tower::Service<(Pooled<P::Connection, R>, R)>,
+{
+    #[allow(clippy::type_complexity)]
+    fn connect_to(
+        &self,
+        request: R,
+    ) -> Result<
+        Checkout<T, P, R>,
+        ConnectionError<T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>,
+    > {
+        let protocol = self.protocol.clone();
+        let transport = self.transport.clone();
+
+        let connector = Connector::new(transport, protocol, request);
+
+        if let Some(manager) = self.manager.as_ref() {
+            tracing::trace!("checking out connection");
+            Ok(manager.checkout(connector))
+        } else {
+            tracing::trace!("detatched connection");
+            Ok(Checkout::detached(connector))
+        }
+    }
+}
+
+impl<P, C, T, S, R> tower::Service<R> for ConnectionManagerService<T, P, S, R>
+where
+    C: Connection<R> + PoolableConnection<R>,
+    P: Protocol<T::IO, R, Connection = C> + Clone + Send + Sync + 'static,
+    T: Transport<R> + Clone + Send + 'static,
+    T::IO: PoolableStream + Unpin,
+    R: Send,
+    S: tower::Service<(Pooled<C, R>, R), Response = C::Response> + Clone + Send + 'static,
 {
     type Response = C::Response;
     type Error = ConnectionError<T::Error, <P as Protocol<T::IO, R>>::Error, S::Error>;

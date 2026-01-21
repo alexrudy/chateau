@@ -1,27 +1,7 @@
 use std::{collections::HashMap, fmt, num::NonZeroUsize};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Token(Option<NonZeroUsize>);
-
-impl Token {
-    pub fn zero() -> Self {
-        Token(None)
-    }
-
-    #[allow(dead_code)]
-    pub fn is_zero(&self) -> bool {
-        self.0.is_none()
-    }
-}
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(value) => write!(f, "Token({value})"),
-            None => write!(f, "Token(0)"),
-        }
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Token(NonZeroUsize);
 
 pub(crate) struct TokenMap<K> {
     counter: NonZeroUsize,
@@ -51,7 +31,7 @@ where
 {
     pub fn insert(&mut self, key: K) -> Token {
         *self.map.entry(key).or_insert_with(|| {
-            let token = Token(Some(self.counter));
+            let token = Token(self.counter);
             self.counter = self
                 .counter
                 .checked_add(1)
@@ -74,10 +54,10 @@ pub(crate) mod test_key {
             ..Default::default()
         };
         let foo = map.insert("key");
-        assert_eq!(foo.0, Some(NonZeroUsize::new(usize::MAX).unwrap()));
+        assert_eq!(foo.0, NonZeroUsize::new(usize::MAX).unwrap());
 
         let bar = map.insert("bar");
-        assert_eq!(bar.0, Some(NonZeroUsize::new(1).unwrap()));
+        assert_eq!(bar.0, NonZeroUsize::new(1).unwrap());
 
         assert_eq!(map.insert("bar"), bar);
         assert_ne!(map.insert("key"), bar);

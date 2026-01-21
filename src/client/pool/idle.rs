@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     marker::PhantomData,
     time::{Duration, Instant},
 };
@@ -24,22 +25,25 @@ impl<T> Idle<T> {
 
 #[derive(Debug)]
 pub(super) struct IdleConnections<T, B> {
-    inner: Vec<Idle<T>>,
+    inner: VecDeque<Idle<T>>,
     _marker: PhantomData<fn(B)>,
 }
 
 impl<T, B> Default for IdleConnections<T, B> {
     fn default() -> Self {
         Self {
-            inner: Vec::new(),
+            inner: VecDeque::new(),
             _marker: PhantomData,
         }
     }
 }
 
 impl<T, B> IdleConnections<T, B> {
-    pub(super) fn push(&mut self, inner: T) {
-        self.inner.push(Idle::new(inner));
+    pub(super) fn push(&mut self, inner: T, max_idle: Option<usize>) {
+        self.inner.push_front(Idle::new(inner));
+        if let Some(max_idle) = max_idle {
+            self.inner.truncate(max_idle);
+        }
     }
 
     pub(super) fn pop(&mut self, idle_timeout: Option<Duration>) -> Option<T>
@@ -60,7 +64,7 @@ impl<T, B> IdleConnections<T, B> {
 
             trace!("checking {} idle connections", self.len());
 
-            while let Some(entry) = self.inner.pop() {
+            while let Some(entry) = self.inner.pop_front() {
                 if exipred.map(|expired| entry.at < expired).unwrap_or(false) {
                     trace!("found expired connection");
                     empty = true;
@@ -122,7 +126,7 @@ mod test {
         assert!(idle.is_empty());
 
         let conn = MockSender::single();
-        idle.push(conn);
+        idle.push(conn, None);
 
         assert_eq!(idle.len(), 1);
         assert!(!idle.is_empty());
@@ -142,9 +146,9 @@ mod test {
         let conn2 = MockSender::single();
         let conn3 = MockSender::single();
 
-        idle.push(conn1);
-        idle.push(conn2);
-        idle.push(conn3);
+        idle.push(conn1, None);
+        idle.push(conn2, None);
+        idle.push(conn3, None);
 
         assert_eq!(idle.len(), 3);
 
@@ -174,9 +178,9 @@ mod test {
         let conn2 = MockSender::single();
         let conn3 = MockSender::single();
 
-        idle.push(conn1);
-        idle.push(conn2);
-        idle.push(conn3);
+        idle.push(conn1, None);
+        idle.push(conn2, None);
+        idle.push(conn3, None);
 
         assert_eq!(idle.len(), 3);
 
@@ -206,9 +210,9 @@ mod test {
         let conn2 = MockSender::single();
         let conn3 = MockSender::single();
 
-        idle.push(conn1);
-        idle.push(conn2);
-        idle.push(conn3);
+        idle.push(conn1, None);
+        idle.push(conn2, None);
+        idle.push(conn3, None);
 
         assert_eq!(idle.len(), 3);
 
@@ -217,5 +221,25 @@ mod test {
         let conn = idle.pop(Some(Duration::from_millis(1)));
         assert!(conn.is_none());
         assert_eq!(idle.len(), 0);
+    }
+
+    #[test]
+    fn test_idle_connections_enforce_max() {
+        let mut idle = IdleConnections::default();
+        assert_eq!(idle.len(), 0);
+
+        let conn1 = MockSender::single();
+        let conn2 = MockSender::single();
+        let conn3 = MockSender::single();
+
+        idle.push(conn1, Some(2));
+        idle.push(conn2, Some(2));
+        idle.push(conn3, Some(2));
+
+        assert_eq!(idle.len(), 2);
+
+        let conn = idle.pop(None);
+        assert!(conn.is_some());
+        assert_eq!(idle.len(), 1);
     }
 }
