@@ -59,6 +59,7 @@ use tokio_util::codec::{Decoder, Encoder, Framed};
 use tracing::{trace, warn};
 
 use crate::client::conn::Connection;
+use crate::client::pool::PoolableConnection;
 use crate::info::HasConnectionInfo;
 
 use super::Protocol;
@@ -223,6 +224,29 @@ where
     }
 }
 
+// Framed, tagged connections are inherently multiplexed, and assumed
+// open if the stream and sink are present.
+impl<C, Req, Res> PoolableConnection<Req> for FramedConnection<C, Req, Res>
+where
+    Req: Tagged + Send + 'static,
+    Res: Tagged<Tag = Req::Tag> + Send + 'static,
+    Req::Tag: Send + 'static,
+    C: Sink<Req> + Stream<Item = Result<Res, C::Error>> + Send + 'static,
+    C::Error: From<io::Error> + std::error::Error + Send + Sync + 'static,
+{
+    fn is_open(&self) -> bool {
+        true
+    }
+
+    fn can_share(&self) -> bool {
+        true
+    }
+
+    fn reuse(&mut self) -> Option<Self> {
+        Some(self.clone())
+    }
+}
+
 impl<C, Req, Res> tower::Service<Req> for FramedConnection<C, Req, Res>
 where
     Req: Tagged,
@@ -340,7 +364,6 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         let _span = tracing::trace_span!("response.poll", tag=?this.tag).entered();
-        trace!("poll response");
         ready!(this.inner.poll_request(cx, this.message))?;
         this.inner.poll_response(cx, this.tag)
     }
@@ -659,6 +682,7 @@ where
         loop {
             trace!("poll response check inbox");
             if let Some(message) = self.inbox.check_inbox(tag) {
+                trace!("inbox has this message");
                 return Poll::Ready(Ok(message));
             }
 
@@ -682,6 +706,8 @@ where
                 Poll::Pending => break,
             }
         }
+
+        trace!("flushing connection");
 
         match self.poll_flush(cx) {
             Poll::Ready(Ok(())) => Poll::Pending,
