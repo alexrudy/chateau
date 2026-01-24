@@ -68,3 +68,6 @@ happy_eyeballs = ["tokio/time"]
 tls = ["dep:rustls-native-certs", "dep:rustls", "dep:tokio-rustls"]
 tls-aws-lc = ["tls", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
 tls-ring = ["tls", "rustls/ring", "tokio-rustls/ring"]
+
+[package.metadata.docs.rs]
+all-features = true
