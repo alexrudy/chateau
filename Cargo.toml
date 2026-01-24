@@ -43,7 +43,7 @@ optional = true
 [dev-dependencies]
 static-assertions = { version = "1", package = "static_assertions" }
 webpki-roots.version = "1.0"
-pem-rfc7468 = { version = "0.7", features = ["alloc"] }
+pem-rfc7468 = { version = "1.0", features = ["alloc"] }
 tokio = { version = "1", features = ["macros", "time"] }
 tracing-test = "0.2"
 
