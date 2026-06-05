@@ -26,6 +26,7 @@ pub use super::checkout::Checkout;
 
 /// Configuration for a connection pool.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[non_exhaustive]
 pub struct ConnectionManagerConfig {
     /// The maximum idle duration of a connection.

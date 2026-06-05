@@ -259,6 +259,7 @@ impl From<TcpConnectionError> for io::Error {
 
 /// Configuration for TCP connections.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[non_exhaustive]
 pub struct TcpTransportConfig {
     /// The timeout for connecting to a remote address.
