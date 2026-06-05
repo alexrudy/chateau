@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/alexrudy/chateau/compare/v0.3.1...v0.3.2) - 2026-06-05
+
+### Added
+
+- add serde derives to some configurations
+
+### Other
+
+- [chore] Upgrade dependencies
+- [chore] Upgrade rustls-webpki
+- Merge pull request #28 from alexrudy/dependabot/cargo/socket2-0.6.2
+- Merge pull request #29 from alexrudy/dependabot/cargo/rustls-native-certs-0.8.3
+
 ## [0.3.1](https://github.com/alexrudy/chateau/compare/v0.3.0...v0.3.1) - 2026-01-24
 
 ### Other
