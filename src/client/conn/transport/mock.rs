@@ -91,11 +91,10 @@ impl MockTransport {
 
     /// Returns whether the transport can be reused.
     pub fn can_reuse(&self) -> bool {
-        match self.mode {
-            TransportMode::Reusable => true,
-            TransportMode::Channel(_) => true,
-            _ => false,
-        }
+        matches!(
+            self.mode,
+            TransportMode::Reusable | TransportMode::Channel(_)
+        )
     }
 
     /// Transport which returns a stream from a oneshot channel
