@@ -62,7 +62,7 @@ use crate::client::conn::Connection;
 use crate::client::pool::PoolableConnection;
 use crate::info::HasConnectionInfo;
 
-use super::Protocol;
+use super::{Multiplexed, Protocol};
 
 /// A trait which represents the identifiers for multiplexed messages.
 pub trait Tagged {
@@ -111,6 +111,12 @@ where
             codec: self.codec.clone(),
             messages: PhantomData,
         }
+    }
+}
+
+impl<C, Req, Res> Multiplexed for FramedProtocol<C, Req, Res> {
+    fn multiplex(&self) -> bool {
+        true
     }
 }
 

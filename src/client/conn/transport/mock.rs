@@ -89,6 +89,15 @@ impl MockTransport {
         }
     }
 
+    /// Returns whether the transport can be reused.
+    pub fn can_reuse(&self) -> bool {
+        match self.mode {
+            TransportMode::Reusable => true,
+            TransportMode::Channel(_) => true,
+            _ => false,
+        }
+    }
+
     /// Transport which returns a stream from a oneshot channel
     pub fn channel(rx: tokio::sync::oneshot::Receiver<MockStream>) -> Self {
         Self {
@@ -98,7 +107,8 @@ impl MockTransport {
 
     /// Create a new connector for the transport.
     pub fn connector(self, request: MockRequest) -> Connector<Self, MockProtocol, MockRequest> {
-        Connector::new(self, MockProtocol::default(), request)
+        let multiplex = self.can_reuse();
+        Connector::new(self, MockProtocol::new(multiplex), request)
     }
 }
 
