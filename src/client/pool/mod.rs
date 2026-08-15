@@ -84,7 +84,7 @@ pub trait Key<R>: Eq + std::hash::Hash + fmt::Debug {
 /// the pool when dropped, if the connection is still open and has not been marked as reusable (reusable connections
 /// are always kept in the pool - there is no need to return dropped copies).
 #[derive(Debug)]
-pub(crate) struct Pool<C, R, K>
+pub struct Pool<C, R, K>
 where
     C: PoolableConnection<R>,
     R: Send + 'static,

@@ -69,11 +69,11 @@ impl<A, S, B, E> Server<A, NeedsProtocol, S, B, E> {
 impl<A, P, B, E> Server<A, P, NeedsService, B, E> {
     /// Set the make service to use for handling incoming connections.
     ///
-    /// A `MakeService` is a factory for creating `Service` instances. It is
-    /// used to create a new `Service` for each incoming connection.
+    /// A [MakeService][tower::make::MakeService] is a factory for creating [Service][tower::Service] instances. It is
+    /// used to create a new [Service][tower::Service] for each incoming connection.
     ///
-    /// If you have a service that is `Clone`, you can use `with_shared_service`
-    /// to wrap it in a `Shared` and avoid constructing a new make service.
+    /// If you have a service that is [Clone], you can use [Server::with_shared_service]
+    /// to wrap it in a [Shared] and avoid constructing a new make service.
     pub fn with_make_service<S>(self, make_service: S) -> Server<A, P, S, B, E> {
         Server {
             acceptor: self.acceptor,
@@ -84,7 +84,7 @@ impl<A, P, B, E> Server<A, P, NeedsService, B, E> {
         }
     }
 
-    /// Wrap a `Clone` service in a `Shared` to use as a make service.
+    /// Wrap a [Clone] service in a [Shared] to use as a make service.
     pub fn with_shared_service<S>(self, service: S) -> Server<A, P, Shared<S>, B, E> {
         Server {
             acceptor: self.acceptor,
@@ -115,7 +115,13 @@ impl<A, P, S, B> Server<A, P, S, B, NeedsExecutor> {
     /// This executor is a suitable default, but does require Send and 'static
     /// bounds in some places to allow futures to be moved between threads.
     ///
-    /// Con
+    /// Consider the [TokioCurrentThreadExecutor][crate::rt::TokioCurrentThreadExecutor]
+    /// if releasing the Send and 'static bounds is necessary.
+    ///
+    /// Neither executor provides good monitoring for in-progress tasks, that is left to
+    /// either middleware for the service, or the protocol's connection type. However,
+    /// it would be easy to implement more sophisticated executors - they just accept
+    /// a [Future] and arrange for it to be polled to completion.
     pub fn with_tokio(self) -> Server<A, P, S, B, TokioExecutor> {
         self.with_executor(TokioExecutor::new())
     }
@@ -125,7 +131,9 @@ impl<A, P, S, B, E> Server<A, P, S, B, E> {
     /// Set the body to use for handling requests.
     ///
     /// Usually this method can be called with inferred
-    /// types.
+    /// types, as it exists only to specify the input body
+    /// type, since many protocols are generic over a suitable
+    /// range of body types.
     pub fn with_request<B2>(self) -> Server<A, P, S, B2, E> {
         Server {
             acceptor: self.acceptor,

@@ -1,4 +1,7 @@
-//! Helpers for working with sinks and streams
+//! Helpers for working with sinks and streams in framed connections.
+//!
+//! Provides [`Joined`], a struct to hold a [`Stream`] and [`Sink`] together
+//! and implements both traits on the joined item.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -7,7 +10,9 @@ use futures::{Sink, Stream};
 
 /// A joined stream and sink
 ///
-/// Provides the inverse of Stream::split
+/// Provides the inverse of Stream::split, combining
+/// a stream and sink into a single object which
+/// implements both traits.
 #[pin_project::pin_project]
 #[derive(Debug, Clone)]
 pub struct Joined<St, Si> {
