@@ -18,6 +18,14 @@ use super::Connection;
 
 use crate::info::HasConnectionInfo;
 
+/// A protocol can be multiplexed if it can handle multiple simultaneous requests
+/// on the same stream. This trait is a helper trait which allows a protocol that
+/// is implemented as a service to declare whether it can multiplex or not.
+pub trait Multiplexed {
+    /// Returns whether this protocol can multiplex multiple requests on the same stream.
+    fn multiplex(&self) -> bool;
+}
+
 /// Protocols (like HTTP) define how data is sent and received over a connection.
 ///
 /// A protocol is a service which accepts a Stream and returns a connection.
@@ -63,7 +71,7 @@ where
 impl<T, C, IO, Req> Protocol<IO, Req> for T
 where
     IO: HasConnectionInfo,
-    T: Service<IO, Response = C> + Send + 'static,
+    T: Service<IO, Response = C> + Multiplexed + Send + 'static,
     T::Error: std::error::Error + Send + Sync + 'static,
     T::Future: Send + 'static,
     C: Connection<Req>,
@@ -81,6 +89,10 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), <Self as Protocol<IO, Req>>::Error>> {
         Service::poll_ready(self, cx)
+    }
+
+    fn multiplex(&self) -> bool {
+        Multiplexed::multiplex(self)
     }
 }
 
@@ -147,6 +159,12 @@ mod tests {
         }
     }
 
+    impl Multiplexed for TestProtocol {
+        fn multiplex(&self) -> bool {
+            false
+        }
+    }
+
     assert_impl_all!(TestProtocol: Protocol<TestIO, TestRequest>);
 
     #[test]
@@ -170,6 +188,6 @@ mod tests {
     #[test]
     fn test_protocol_multiplex_default() {
         let protocol = TestProtocol;
-        assert!(!protocol.multiplex());
+        assert!(!Protocol::multiplex(&protocol));
     }
 }
