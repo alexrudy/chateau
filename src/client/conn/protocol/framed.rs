@@ -41,7 +41,7 @@
 //! the connection forward. This can be done by getting a [ConnectionDriver]
 //! via the [`driver`](FramedConnection::driver) method, and then spawning that driver onto a runtime.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::future::{Ready, ready};
 use std::hash::Hash;
@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker, ready};
 
 use futures::{Sink, SinkExt, Stream, StreamExt as _, task::AtomicWaker, task::noop_waker};
-use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
+use parking_lot::{ArcMutexGuard, Mutex, MutexGuard, RawMutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 use tracing::{trace, warn};
@@ -93,7 +93,7 @@ pub struct FramedProtocol<C, Req, Res> {
 }
 
 impl<C, Req, Res> FramedProtocol<C, Req, Res> {
-    /// Create a new framed protocol`
+    /// Create a new framed protocol
     pub fn new(codec: C) -> Self {
         Self {
             codec,
@@ -457,12 +457,7 @@ where
     Res: Tagged,
 {
     fn drop(self: Pin<&mut Self>) {
-        if let Some(waker) = self
-            .inner
-            .send_queue
-            .try_lock()
-            .and_then(|mut g| g.queue.pop_front())
-        {
+        if let Some(waker) = self.inner.send_queue.try_recv() {
             // Wake up a queued sender to make progress.
             waker.wake();
         } else {
@@ -510,14 +505,110 @@ impl<M> Inflight<M> {
     }
 }
 
-#[pin_project::pin_project]
-struct SendQueue<M> {
-    // Next message to send, plus a waker to let the sending
-    // task know it should start polling for a response.
-    pending: Option<(M, Waker)>,
+struct PermitTx<'a, M> {
+    channel: &'a SendQueue<M>,
+}
 
-    // Notify when a new spot opens up.
-    queue: VecDeque<Waker>,
+impl<M> PermitTx<'_, M> {
+    fn send(self, message: M, waker: Waker) {
+        if let Some(mut inner) = self.channel.pending.try_lock() {
+            *inner = Some((message, waker));
+            self.channel.ready.store(true, Ordering::Release);
+        } else {
+            panic!("SendQueue locked, but we hold a permit");
+        }
+    }
+}
+
+struct PermitRx<'a, M> {
+    pending: MutexGuard<'a, Option<(M, Waker)>>,
+    item: Option<(M, Waker)>,
+}
+
+impl<'a, M> PermitRx<'a, M> {
+    fn take(mut self) -> (M, Waker) {
+        self.item.take().expect("Message taken before drop")
+    }
+}
+
+impl<'a, M> Drop for PermitRx<'a, M> {
+    fn drop(&mut self) {
+        if let Some((message, waker)) = self.item.take() {
+            *self.pending = Some((message, waker));
+        }
+    }
+}
+
+struct SendQueue<M> {
+    ready: AtomicBool,
+    notify: AtomicWaker,
+    pending: Mutex<Option<(M, Waker)>>,
+    tx: tokio::sync::mpsc::UnboundedSender<Waker>,
+    rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<Waker>>,
+}
+
+impl<M> SendQueue<M> {
+    fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            ready: AtomicBool::new(true),
+            notify: AtomicWaker::new(),
+            pending: Mutex::new(None),
+            tx,
+            rx: Mutex::new(rx),
+        }
+    }
+
+    fn try_recv(&self) -> Option<Waker> {
+        self.rx.try_lock().and_then(|mut rx| rx.try_recv().ok())
+    }
+
+    fn try_reserve(&self) -> Option<PermitTx<'_, M>> {
+        if self.ready.load(Ordering::Acquire) {
+            return Some(PermitTx { channel: self });
+        }
+        None
+    }
+
+    fn poll_reserve(&self, cx: &mut Context<'_>) -> Poll<PermitTx<'_, M>> {
+        if self.ready.load(Ordering::Acquire) {
+            return Poll::Ready(PermitTx { channel: self });
+        }
+
+        self.tx
+            .send(cx.waker().clone())
+            .expect("unbounded queue send failed");
+        Poll::Pending
+    }
+
+    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.ready.load(Ordering::Relaxed) {
+            return Poll::Ready(());
+        }
+
+        self.tx
+            .send(cx.waker().clone())
+            .expect("unbounded queue send failed");
+        Poll::Pending
+    }
+
+    fn poll_message<'q>(&'q self, cx: &mut Context<'_>) -> Poll<PermitRx<'q, M>> {
+        if !self.ready.load(Ordering::Relaxed) {
+            self.notify.register(cx.waker());
+            Poll::Pending
+        } else if let Some(mut inner) = self.pending.try_lock() {
+            let (message, waker) = inner
+                .take()
+                .expect("pending item and ready not synchronized");
+            self.ready.store(false, Ordering::Release);
+            Poll::Ready(PermitRx {
+                item: Some((message, waker)),
+                pending: inner,
+            })
+        } else {
+            unreachable!("pending item and ready not synchronized");
+        }
+    }
 }
 
 struct InnerProtocol<C, Req, Res>
@@ -525,7 +616,7 @@ where
     Res: Tagged,
 {
     inbox: Inbox<Res>,
-    send_queue: Mutex<SendQueue<Req>>,
+    send_queue: SendQueue<Req>,
     notify: AtomicWaker,
     codec: Arc<Mutex<Pin<Box<C>>>>,
     ready: AtomicBool,
@@ -553,14 +644,17 @@ where
             Poll::Ready(Ok(()))
         } else {
             trace!("poll ready queue");
-            let mut send_queue = self.send_queue.lock();
-            if send_queue.pending.is_none() {
-                trace!("pending slot available");
-                return Poll::Ready(Ok(()));
+
+            match self.send_queue.poll_ready(cx) {
+                Poll::Pending => {
+                    trace!("enqued waiter");
+                    Poll::Pending
+                }
+                Poll::Ready(()) => {
+                    trace!("send queue ready");
+                    Poll::Ready(Ok(()))
+                }
             }
-            trace!("enqueued waiter");
-            send_queue.queue.push_back(cx.waker().clone());
-            Poll::Pending
         }
     }
 
@@ -568,6 +662,12 @@ where
     ///
     /// When a driver is driving this protocol elsewhere, this can be used to enque a message.
     fn try_send(&self, item: &mut Option<Req>) -> Result<bool, C::Error> {
+        // fn try_send() accepts a &mut Option<Req> becaues we want this method to
+        // conditionally take owndership of the request, only if it is able to start the send.
+        //
+        // Alternatively, this could be implemented via a permit process, or a new error type
+        // which returns the underlying message. Since this is a private internal API, that isn't done.
+        debug_assert!(item.is_some(), "Expected available request");
         if let Some(mut codec) = self.codec.try_lock() {
             if !self.ready.load(Ordering::Acquire) {
                 return Ok(false);
@@ -578,23 +678,24 @@ where
             trace!(?tag, "start message send");
             codec.start_send_unpin(message)?;
             self.ready.store(false, Ordering::Release);
-            let mut send_queue = self.send_queue.lock();
-            if let Some(waker) = send_queue.queue.pop_front() {
+
+            if let Some(waker) = self.send_queue.try_recv() {
                 // Notify another task which was waiting for the slot to send messages.
                 trace!("wake next in queue");
                 waker.wake();
             }
+
             Ok(true)
         } else {
-            let mut send_queue = self.send_queue.lock();
-            if send_queue.pending.is_some() {
-                return Ok(false);
+            if let Some(permit) = self.send_queue.try_reserve() {
+                let message = item.take().expect("message stolen");
+                let waker = noop_waker();
+                permit.send(message, waker);
+                self.notify.wake();
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            let message = item.take().expect("message stolen");
-            let waker = noop_waker();
-            send_queue.pending = Some((message, waker));
-            self.notify.wake();
-            Ok(true)
         }
     }
 
@@ -603,6 +704,11 @@ where
         cx: &mut Context<'_>,
         item: &mut Option<Req>,
     ) -> Poll<Result<bool, C::Error>> {
+        // fn poll_send() accepts a &mut Option<Req> becaues we want this method to
+        // conditionally take owndership of the request, only if it is able to start the send.
+        //
+        // Alternatively, this could be implemented via a permit process, or a new error type
+        // which returns the underlying message. Since this is a private internal API, that isn't done.
         debug_assert!(item.is_some(), "poll_send without message for queue?");
         if let Some(mut codec) = self.codec.try_lock() {
             trace!("codec unlocked, no driver");
@@ -619,25 +725,28 @@ where
             codec.start_send_unpin(message)?;
             self.ready.store(false, Ordering::Release);
             self.inbox.pending_response(tag, cx.waker());
-            let mut send_queue = self.send_queue.lock();
-            if let Some(waker) = send_queue.queue.pop_front() {
+
+            if let Some(waker) = self.send_queue.try_recv() {
                 // Notify another task which was waiting for the slot to send messages.
                 trace!("wake next in queue");
                 waker.wake();
             }
+
             Poll::Ready(Ok(true))
         } else {
             trace!("codec locked, using queue");
-            let mut send_queue = self.send_queue.lock();
-            if send_queue.pending.is_some() {
-                send_queue.queue.push_back(cx.waker().clone());
-                Poll::Ready(Ok(false))
-            } else {
-                send_queue.pending =
-                    Some((item.take().expect("stolen message"), cx.waker().clone()));
-                self.notify.wake();
-                Poll::Ready(Ok(false))
-            }
+
+            let permit = match self.send_queue.poll_reserve(cx) {
+                Poll::Ready(permit) => permit,
+                Poll::Pending => return Poll::Ready(Ok(false)),
+            };
+            permit.send(
+                item.take().expect("message stolen in poll_send"),
+                cx.waker().clone(),
+            );
+
+            self.notify.wake();
+            Poll::Ready(Ok(false))
         }
     }
 
@@ -739,29 +848,27 @@ where
             self.notify.register(cx.waker());
 
             // Check for messages to send first.
-            if let Some(mut send_queue) = self.send_queue.try_lock() {
-                trace!("checking send queue");
-                if send_queue.pending.is_some() {
-                    if !self.ready.load(Ordering::Acquire) {
-                        if let Err(error) = ready!(codec.poll_ready_unpin(cx)) {
-                            return Poll::Ready(Err(error));
-                        }
-                    }
-
-                    let (message, waker) = send_queue.pending.take().expect("message stolen");
-                    let tag = message.tag();
-                    trace!(?tag, "sending pending message from slot");
-
-                    codec.start_send_unpin(message)?;
-                    self.inbox.pending_response(tag, &waker);
-                    self.ready.store(false, Ordering::Release);
-                    if let Some(waker) = send_queue.queue.pop_front() {
-                        // Notify another task which was waiting for the slot to send messages.
-                        waker.wake();
+            trace!("checking send queue");
+            if let Poll::Ready(permit) = self.send_queue.poll_message(cx) {
+                if !self.ready.load(Ordering::Acquire) {
+                    if let Err(error) = ready!(codec.poll_ready_unpin(cx)) {
+                        return Poll::Ready(Err(error));
                     }
                 }
+
+                let (message, waker) = permit.take();
+                let tag = message.tag();
+                trace!(?tag, "sending pending message from slot");
+
+                codec.start_send_unpin(message)?;
+                self.inbox.pending_response(tag, &waker);
+                self.ready.store(false, Ordering::Release);
+                if let Some(waker) = self.send_queue.try_recv() {
+                    // Notify another task which was waiting for the slot to send messages.
+                    waker.wake();
+                }
             } else {
-                trace!("send queue locked");
+                trace!("send queue empty");
                 // If nothing needs to be sent right away, make progress on writes anyways.
                 if let Err(error) = ready!(codec.poll_flush_unpin(cx)) {
                     return Poll::Ready(Err(error));
@@ -802,10 +909,7 @@ where
     fn new(codec: C) -> Self {
         Self {
             inbox: Inbox::new(),
-            send_queue: Mutex::new(SendQueue {
-                pending: None,
-                queue: VecDeque::with_capacity(0),
-            }),
+            send_queue: SendQueue::new(),
             notify: AtomicWaker::new(),
             ready: AtomicBool::new(false),
             codec: Arc::new(Mutex::new(Box::pin(codec))),
