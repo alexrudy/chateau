@@ -138,7 +138,6 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         let config = self.config.clone();
-        let span = tracing::trace_span!("tcp");
 
         let resolve = self.resolver.resolve(req);
 
@@ -157,7 +156,7 @@ where
 
                 Ok(stream)
             }
-            .instrument(span),
+            .instrument(tracing::trace_span!("tcp-connect")),
         )
     }
 }
