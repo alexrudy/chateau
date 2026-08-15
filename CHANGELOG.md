@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Fixed
+- support for multiplexing client connections
+- reduced long-lived tracing spans (especially in TLS)
+
 ## [0.3.2](https://github.com/alexrudy/chateau/compare/v0.3.1...v0.3.2) - 2026-06-05
 
 ### Added
