@@ -3,23 +3,33 @@
 nightly := "nightly-2025-06-20"
 msrv := "1.87"
 rust := env("RUSTUP_TOOLCHAIN", "stable")
-feature-set := "mock,tls-ring,server,client,duplex"
-extended-features := "mock,tls,tls-ring,server,client,duplex"
+feature-set := "mock,tls-ring,server,client,duplex,codec"
+extended-features := "mock,tls,tls-ring,server,client,duplex,codec"
 
 # Run all checks
 all: fmt check-all deny clippy examples docs test machete udeps msrv
     @echo "All checks passed 🍻"
 
 # Check for unused dependencies
-udeps: udeps-one udeps-hack
+udeps: udeps-one udeps-client udeps-server
 
 # [private]
 udeps-one:
     CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --all-features
 
 # [private]
-udeps-hack:
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} hack udeps --each-feature
+udeps-client:
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring,mock,codec,duplex
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,codec
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,duplex
+
+udeps-server:
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring,mock,codec,duplex
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,codec
+    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,duplex
+
 
 # Use machete to check for unused dependencies
 machete:
