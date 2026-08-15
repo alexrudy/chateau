@@ -13,13 +13,13 @@ categories = ["network-programming"]
 keywords = ["tcp", "tower", "client", "server", "async"]
 
 [dependencies]
-futures = "0.3"
-parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
+futures = { version = "0.3", optional = true }
+parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"], optional = true }
 pin-project = { version = "1" }
 rustls-native-certs = { version = "0.8.3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true}
 socket2 = { version = "0.6" }
-thiserror = { version = "2" }
+thiserror = { version = "2", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 tracing = { version = "^0.1" }
@@ -60,13 +60,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 [features]
 default = ["client", "server", "duplex"]
 docs = []
-client = ["happy_eyeballs"]
-server = []
-mock = []
-codec = ["tokio-util/codec"]
-duplex = []
-serde = ["dep:serde"]
-happy_eyeballs = ["tokio/time"]
+client = ["happy_eyeballs", "dep:thiserror", "dep:futures", "dep:parking_lot"]
+server = ["dep:thiserror"]
+mock = ["dep:futures"]
+codec = ["tokio-util/codec", "dep:futures", "dep:parking_lot"]
+duplex = ["dep:futures"]
+happy_eyeballs = ["tokio/time", "dep:futures"]
 tls = ["dep:rustls-native-certs", "dep:rustls", "dep:tokio-rustls"]
 tls-aws-lc = ["tls", "rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
 tls-ring = ["tls", "rustls/ring", "tokio-rustls/ring"]
