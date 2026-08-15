@@ -166,15 +166,19 @@ where
     ) -> Poll<Result<Option<Instrumented<P::Connection>>, ServerError>> {
         let mut me = self.as_mut().project();
 
-        let _guard = me.span.enter();
-
         match me.state.as_mut().project() {
             StateProj::Preparing => {
-                ready!(me.server.make_service.poll_ready_ref(cx)).map_err(ServerError::ready)?;
+                ready!(
+                    me.span
+                        .in_scope(|| me.server.make_service.poll_ready_ref(cx))
+                )
+                .map_err(ServerError::ready)?;
                 me.state.set(State::Accepting);
             }
-            StateProj::Accepting => match ready!(Pin::new(&mut me.server.acceptor).poll_accept(cx))
-            {
+            StateProj::Accepting => match ready!(
+                me.span
+                    .in_scope(|| Pin::new(&mut me.server.acceptor).poll_accept(cx))
+            ) {
                 Ok(stream) => {
                     let future = me.server.make_service.make_service_ref(&stream);
                     me.state.set(State::Making { future, stream });
@@ -184,11 +188,14 @@ where
                 }
             },
             StateProj::Making { future, .. } => {
-                let service = ready!(future.poll(cx)).map_err(ServerError::make)?;
+                let service =
+                    ready!(me.span.in_scope(|| future.poll(cx))).map_err(ServerError::make)?;
                 if let StateProjOwn::Making { stream, .. } =
                     me.state.project_replace(State::Preparing)
                 {
                     let span = tracing::debug_span!(parent: None, "connection");
+                    span.follows_from(me.span.id());
+
                     let conn = me
                         .server
                         .protocol

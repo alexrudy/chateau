@@ -310,6 +310,7 @@ pub mod future {
                         }
                         Poll::Ready(Err(e)) => {
                             tracing::trace!(?e, "Transport connection error");
+                            this.span.take();
                             return Poll::Ready(Err(TlsConnectionError::Connection(e)));
                         }
                         Poll::Pending => return Poll::Pending,
@@ -328,10 +329,15 @@ pub mod future {
                                 };
 
                                 tracing::trace!("TLS handshake complete");
+                                drop(_guard);
+                                this.span.take();
+
                                 return Poll::Ready(Ok(stream));
                             }
                             Poll::Ready(Err(e)) => {
                                 tracing::trace!(?e, "Transport handshake error");
+                                drop(_guard);
+                                this.span.take();
                                 return Poll::Ready(Err(TlsConnectionError::Handshake(e)));
                             }
                             Poll::Pending => return Poll::Pending,
@@ -343,7 +349,7 @@ pub mod future {
                         else {
                             unreachable!();
                         };
-
+                        this.span.take();
                         return Poll::Ready(Err(error));
                     }
                     StateProject::Invalid => panic!("polled after ready"),
