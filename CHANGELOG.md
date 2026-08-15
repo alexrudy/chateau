@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/alexrudy/chateau/compare/v0.3.2...v0.3.3) - 2026-08-15
+
+### Other
+
+- Update Changelog.md
+- *(deps)* Bump pem-rfc7468 from 0.7.0 to 1.0.0
+- Merge pull request #49 from alexrudy/chore/docs
+- Doc improvements
+
 ## Fixed
 - support for multiplexing client connections
 - reduced long-lived tracing spans (especially in TLS)

@@ -1,6 +1,6 @@
 [package]
 name = "chateau"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Tower primitives for Servers and Clients with ergonomic APIs"
 license = "MIT"
