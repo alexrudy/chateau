@@ -213,7 +213,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Result<P::Connection, ConnectorError<T, P, R>>>
     where
-        F: FnOnce(),
+        F: FnOnce(bool),
     {
         let mut connector_projected = self.as_mut().project();
         let mut notifier = Some(notify);
@@ -295,10 +295,8 @@ where
                     let multiplex = protocol.multiplex_ready(&stream);
                     let future = protocol.connect(stream);
 
-                    if multiplex {
-                        if let Some(notifier) = notifier.take() {
-                            notifier();
-                        }
+                    if let Some(notifier) = notifier.take() {
+                        notifier(multiplex);
                     }
 
                     tracing::trace!(multiplex, "handshake ready");
@@ -358,7 +356,11 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.as_mut().project();
 
-        let connection = ready!(this.connector.as_mut().poll_connector(|| (), this.meta, cx));
+        let connection = ready!(
+            this.connector
+                .as_mut()
+                .poll_connector(|_| (), this.meta, cx)
+        );
         Poll::Ready(connection.map(|c| {
             (
                 c,
@@ -569,7 +571,7 @@ mod future {
                     ResponseFutureStateProj::Connect {
                         mut connector,
                         service,
-                    } => match connector.as_mut().poll_connector(|| (), this.meta, cx) {
+                    } => match connector.as_mut().poll_connector(|_| (), this.meta, cx) {
                         Poll::Ready(Ok(conn)) => ResponseFutureState::Request(
                             service.call((
                                 conn,
@@ -704,7 +706,7 @@ mod tests {
             let result =
                 connector
                     .as_mut()
-                    .poll_connector(|| notified.set(true), &mut meta, &mut cx);
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
 
             let Poll::Ready(connection) = result else {
                 panic!("connector should resolve immediately for the mock transport/protocol");
@@ -743,7 +745,7 @@ mod tests {
             let result =
                 connector
                     .as_mut()
-                    .poll_connector(|| notified.set(true), &mut meta, &mut cx);
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
 
             let Poll::Ready(connection) = result else {
                 panic!("connector should resolve immediately for the mock transport/protocol");

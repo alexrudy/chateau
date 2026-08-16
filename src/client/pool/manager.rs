@@ -128,7 +128,7 @@ where
     /// Checks out a connection from the connection manager.
     fn checkout<T, P>(
         manager: &mut ArcMutexGuard<Self>,
-        connector: Connector<T, P, R>,
+        mut connector: Connector<T, P, R>,
     ) -> Checkout<T, P, R>
     where
         T: Transport<R> + Send,
@@ -136,18 +136,10 @@ where
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let multiplex = connector.multiplex();
-        let mut connector: Option<Connector<T, P, R>> = Some(connector);
         if let Some(connection) = manager.pop() {
             trace!("connection found in pool");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            return Checkout::new(
-                manager.downgrade(),
-                rx,
-                connector,
-                Some(connection),
-                request,
-                &manager.config,
-            );
+            let request = connector.take_request_unpinned();
+            return Checkout::new_connected(manager.downgrade(), rx, connection, request);
         }
 
         trace!("checkout interested in pooled connections");
@@ -155,15 +147,7 @@ where
 
         if manager.connecting {
             trace!("connection in progress elsewhere, will wait");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            Checkout::new(
-                manager.downgrade(),
-                rx,
-                connector,
-                None,
-                request,
-                &manager.config,
-            )
+            Checkout::new_connecting(manager.downgrade(), rx, connector)
         } else {
             if multiplex {
                 // Only block new connection attempts if we can multiplex on this one.
@@ -171,14 +155,7 @@ where
                 manager.connecting = true;
             }
             trace!("connecting to host");
-            Checkout::new(
-                manager.downgrade(),
-                rx,
-                connector,
-                None,
-                None,
-                &manager.config,
-            )
+            Checkout::new_idle(manager.downgrade(), rx, connector, &manager.config)
         }
     }
 
@@ -194,8 +171,14 @@ where
     ///
     /// New connection attempts will wait for this connection to complete the
     /// handshake and re-use it if possible.
-    pub(in crate::client) fn connected_in_handshake(&mut self) {
-        self.connecting = true
+    pub(in crate::client) fn connected_in_handshake(&mut self, multiplex: bool) {
+        self.connecting = multiplex;
+        if !multiplex {
+            // We can't multiplex on this connection, so all waiters should give up
+            // and start their own connection attempts.
+            trace!(waiters=%self.waiting.len(), "dropping waiters");
+            self.waiting.clear();
+        }
     }
 
     /// Push a connection back onto this manager
@@ -445,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkout_drop_pool_err() {
+    async fn checkout_drop_pool_recover() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
@@ -460,7 +443,7 @@ mod tests {
         drop(start);
         drop(manager);
 
-        assert!(checkout.now_or_never().unwrap().is_err());
+        assert!(checkout.now_or_never().unwrap().is_ok());
     }
 
     #[tokio::test]

@@ -109,6 +109,16 @@ where
     NotReady,
 }
 
+impl<C, B> WaitingPoll<C, B>
+where
+    C: PoolableConnection<B>,
+    B: Send + 'static,
+{
+    fn is_ready(&self) -> bool {
+        matches!(self, WaitingPoll::Connected(_) | WaitingPoll::Closed)
+    }
+}
+
 impl<C, B> Future for Waiting<C, B>
 where
     C: PoolableConnection<B>,
@@ -131,7 +141,9 @@ where
             WaitingProjected::None => Poll::Ready(WaitingPoll::Closed),
         };
 
-        if polled.is_ready() {
+        if let Poll::Ready(p) = &polled
+            && p.is_ready()
+        {
             self.as_mut().set(Waiting::None);
         };
 
@@ -147,8 +159,8 @@ where
     P::Connection: PoolableConnection<R>,
     R: Send + 'static,
 {
-    Waiting,
-    Connected,
+    Done(Option<R>),
+    Connected(Option<(P::Connection, R)>),
     Connecting(Pin<Box<Connector<T, P, R>>>),
     #[allow(clippy::type_complexity)]
     ConnectingWithDelayDrop(Option<Pin<Box<Connector<T, P, R>>>>),
@@ -164,8 +176,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
-            InnerCheckoutConnecting::Waiting => f.debug_tuple("Waiting").finish(),
-            InnerCheckoutConnecting::Connected => f.debug_tuple("Connected").finish(),
+            InnerCheckoutConnecting::Done(_) => f.debug_tuple("Done").finish(),
+            InnerCheckoutConnecting::Connected(_) => f.debug_tuple("Connected").finish(),
             InnerCheckoutConnecting::Connecting(connector) => {
                 f.debug_tuple("Connecting").field(connector).finish()
             }
@@ -194,8 +206,6 @@ where
     waiter: Waiting<P::Connection, R>,
     #[pin]
     inner: InnerCheckoutConnecting<T, P, R>,
-    request: Option<R>,
-    connection: Option<P::Connection>,
     meta: ConnectorMeta,
     #[cfg(debug_assertions)]
     id: CheckoutId,
@@ -235,8 +245,6 @@ where
                     manager: this.manager.clone(),
                     waiter: Waiting::None,
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
-                    request: None,
-                    connection: None,
                     meta: ConnectorMeta::new(), // New meta to avoid holding spans in the spawned task
                     #[cfg(debug_assertions)]
                     id: *this.id,
@@ -247,11 +255,22 @@ where
     }
 
     pub(crate) fn take_request_pinned(mut self: Pin<&mut Self>) -> R {
-        self.as_mut()
-            .project()
-            .request
-            .take()
-            .expect("request is available")
+        match self.as_mut().project().inner.project() {
+            CheckoutConnectingProj::Done(request) => {
+                request.take().expect("checkout request already taken")
+            }
+            CheckoutConnectingProj::Connected(connection) => {
+                let (_, request) = connection.take().expect("checkout request already taken");
+                request
+            }
+            CheckoutConnectingProj::Connecting(pin) => pin.as_mut().take_request_pinned(),
+            CheckoutConnectingProj::ConnectingWithDelayDrop(pin) => pin
+                .take()
+                .expect("checkout connector already taken")
+                .as_mut()
+                .take_request_pinned(),
+            CheckoutConnectingProj::ConnectingDelayed(pin) => pin.as_mut().take_request_pinned(),
+        }
     }
 
     /// Constructs a checkout which does not hold a reference to the manager
@@ -275,20 +294,59 @@ where
             manager: ManagerRef::none(),
             waiter: Waiting::None,
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
-            request: None,
-            connection: None,
             meta: ConnectorMeta::new(),
             #[cfg(debug_assertions)]
             id,
         }
     }
 
-    pub(super) fn new(
+    pub(super) fn new_connected(
         manager: ManagerRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
-        connect: Option<Connector<T, P, R>>,
-        connection: Option<P::Connection>,
-        request: Option<R>,
+        connection: P::Connection,
+        request: R,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        let id = CheckoutId::new();
+        let meta = ConnectorMeta::new();
+
+        tracing::trace!("connection recieved from manager");
+        Self {
+            manager,
+            waiter: Waiting::Idle(waiter),
+            inner: InnerCheckoutConnecting::Connected(Some((connection, request))),
+            meta,
+            #[cfg(debug_assertions)]
+            id,
+        }
+    }
+
+    pub(super) fn new_connecting(
+        manager: ManagerRef<P::Connection, R>,
+        waiter: Receiver<Pooled<P::Connection, R>>,
+        connector: Connector<T, P, R>,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        let id = CheckoutId::new();
+        let meta = ConnectorMeta::new();
+
+        #[cfg(debug_assertions)]
+        tracing::trace!(%id, "creating new checkout");
+
+        Self {
+            manager,
+            waiter: Waiting::Connecting(waiter),
+            inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
+            meta,
+            #[cfg(debug_assertions)]
+            id,
+        }
+    }
+
+    pub(super) fn new_idle(
+        manager: ManagerRef<P::Connection, R>,
+        waiter: Receiver<Pooled<P::Connection, R>>,
+        connector: Connector<T, P, R>,
         config: &ConnectionManagerConfig,
     ) -> Self {
         #[cfg(debug_assertions)]
@@ -298,49 +356,20 @@ where
         #[cfg(debug_assertions)]
         tracing::trace!( %id, "creating new checkout");
 
-        if connection.is_some() {
-            tracing::trace!("connection recieved from manager");
-            Self {
-                manager,
-                waiter: Waiting::Idle(waiter),
-                inner: InnerCheckoutConnecting::Connected,
-                request: request.or(connect.map(|mut c| c.take_request_unpinned())),
-                connection,
-                meta,
-                #[cfg(debug_assertions)]
-                id,
-            }
-        } else if let Some(connector) = connect {
-            tracing::trace!("connecting to manager");
-
-            let inner = if config.continue_after_preemption {
-                InnerCheckoutConnecting::ConnectingWithDelayDrop(Some(Box::pin(connector)))
-            } else {
-                InnerCheckoutConnecting::Connecting(Box::pin(connector))
-            };
-
-            Self {
-                manager,
-                waiter: Waiting::Idle(waiter),
-                inner,
-                request,
-                connection,
-                meta,
-                #[cfg(debug_assertions)]
-                id,
-            }
+        let inner = if config.continue_after_preemption {
+            InnerCheckoutConnecting::ConnectingWithDelayDrop(Some(Box::pin(connector)))
         } else {
-            tracing::trace!("waiting for connection");
-            Self {
-                manager,
-                waiter: Waiting::Connecting(waiter),
-                inner: InnerCheckoutConnecting::Waiting,
-                request,
-                connection,
-                meta,
-                #[cfg(debug_assertions)]
-                id,
-            }
+            InnerCheckoutConnecting::Connecting(Box::pin(connector))
+        };
+
+        Self {
+            manager,
+            waiter: Waiting::Idle(waiter),
+            inner,
+
+            meta,
+            #[cfg(debug_assertions)]
+            id,
         }
     }
 }
@@ -373,15 +402,6 @@ where
             if let WaitingPoll::Connected(connection) = ready!(this.waiter.as_mut().poll(cx)) {
                 debug!("connection recieved from waiter");
 
-                match this.inner.as_mut().project() {
-                    CheckoutConnectingProj::ConnectingWithDelayDrop(Some(connector))
-                    | CheckoutConnectingProj::ConnectingDelayed(connector)
-                    | CheckoutConnectingProj::Connecting(connector) => {
-                        *this.request = Some(connector.as_mut().take_request_pinned());
-                    }
-                    _ => {}
-                };
-
                 return Poll::Ready(Ok(connection));
             }
         }
@@ -390,33 +410,26 @@ where
         // Try to connect while we also wait for a checkout to be ready.
 
         match this.inner.as_mut().project() {
-            CheckoutConnectingProj::Waiting => {
-                // We're waiting on a connection to be ready.
-                // If that were still happening, we would bail out above, since the waiter
-                // would return Poll::Pending.
+            CheckoutConnectingProj::Done(_) => {
+                // The connection was already returned elsewhere, did this future get polled again?
                 Poll::Ready(Err(ConnectorError::Unavailable))
             }
-            CheckoutConnectingProj::Connected => {
-                // We've already connected, we can just return the connection.
-                let connection = this
-                    .connection
-                    .take()
-                    .expect("future was polled after completion");
-
+            CheckoutConnectingProj::Connected(conn) => {
                 this.waiter.close();
-                this.inner.set(InnerCheckoutConnecting::Connected);
+                let (connection, request) = conn.take().expect("checkout request already taken");
+                this.inner.set(InnerCheckoutConnecting::Done(Some(request)));
                 Poll::Ready(Ok(register_connected(this.manager, connection)))
             }
             CheckoutConnectingProj::Connecting(connector) => {
                 let result = ready!(connector.as_mut().poll_connector(
                     {
                         let manager = this.manager.clone();
-                        move || {
+                        move |multiplex| {
                             trace!(
                                 "connection can be shared, telling manager to wait for handshake"
                             );
                             if let Some(mut manager) = manager.lock() {
-                                manager.connected_in_handshake();
+                                manager.connected_in_handshake(multiplex);
                             }
                         }
                     },
@@ -425,8 +438,8 @@ where
                 ));
 
                 this.waiter.close();
-                *this.request = Some(connector.as_mut().take_request_pinned());
-                this.inner.set(InnerCheckoutConnecting::Connected);
+                let request = connector.as_mut().take_request_pinned();
+                this.inner.set(InnerCheckoutConnecting::Done(Some(request)));
 
                 match result {
                     Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
@@ -438,12 +451,12 @@ where
                 let result = ready!(connector.as_mut().poll_connector(
                     {
                         let manager = this.manager.clone();
-                        move || {
+                        move |multiplex| {
                             trace!(
                                 "connection can be shared, telling manager to wait for handshake"
                             );
                             if let Some(mut manager) = manager.lock() {
-                                manager.connected_in_handshake();
+                                manager.connected_in_handshake(multiplex);
                             }
                         }
                     },
@@ -452,8 +465,8 @@ where
                 ));
 
                 this.waiter.close();
-                *this.request = Some(connector.as_mut().take_request_pinned());
-                this.inner.set(InnerCheckoutConnecting::Connected);
+                let request = connector.as_mut().take_request_pinned();
+                this.inner.set(InnerCheckoutConnecting::Done(Some(request)));
 
                 match result {
                     Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
