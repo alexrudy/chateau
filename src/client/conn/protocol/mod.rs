@@ -21,9 +21,12 @@ use crate::info::HasConnectionInfo;
 /// A protocol can be multiplexed if it can handle multiple simultaneous requests
 /// on the same stream. This trait is a helper trait which allows a protocol that
 /// is implemented as a service to declare whether it can multiplex or not.
-pub trait Multiplexed {
+pub trait Multiplexed<IO> {
     /// Returns whether this protocol can multiplex multiple requests on the same stream.
     fn multiplex(&self) -> bool;
+
+    /// Returns whether this protocol is ready to handle a multiplexed request on the given stream.
+    fn multiplex_ready(&self, io: &IO) -> bool;
 }
 
 /// Protocols (like HTTP) define how data is sent and received over a connection.
@@ -98,7 +101,7 @@ where
 impl<T, C, IO, Req> Protocol<IO, Req> for T
 where
     IO: HasConnectionInfo,
-    T: Service<IO, Response = C> + Multiplexed + Send + 'static,
+    T: Service<IO, Response = C> + Multiplexed<IO> + Send + 'static,
     T::Error: std::error::Error + Send + Sync + 'static,
     T::Future: Send + 'static,
     C: Connection<Req>,
@@ -120,6 +123,10 @@ where
 
     fn multiplex(&self) -> bool {
         Multiplexed::multiplex(self)
+    }
+
+    fn multiplex_ready(&self, io: &IO) -> bool {
+        Multiplexed::multiplex_ready(self, io)
     }
 }
 
@@ -186,8 +193,12 @@ mod tests {
         }
     }
 
-    impl Multiplexed for TestProtocol {
+    impl Multiplexed<TestIO> for TestProtocol {
         fn multiplex(&self) -> bool {
+            false
+        }
+
+        fn multiplex_ready(&self, _: &TestIO) -> bool {
             false
         }
     }
