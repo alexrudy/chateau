@@ -207,6 +207,11 @@ where
     #[pin]
     inner: InnerCheckoutConnecting<T, P, R>,
     meta: ConnectorMeta,
+    /// Whether this checkout is the one responsible for the manager's shared
+    /// `connecting` flag (i.e. it is the checkout other checkouts are
+    /// queued up waiting behind). Only such a checkout should release those
+    /// waiters if it is abandoned before its connection attempt finishes.
+    is_leader: bool,
     #[cfg(debug_assertions)]
     id: CheckoutId,
 }
@@ -246,6 +251,7 @@ where
                     waiter: Waiting::None,
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
                     meta: ConnectorMeta::new(), // New meta to avoid holding spans in the spawned task
+                    is_leader: *this.is_leader,
                     #[cfg(debug_assertions)]
                     id: *this.id,
                 })
@@ -295,6 +301,7 @@ where
             waiter: Waiting::None,
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             meta: ConnectorMeta::new(),
+            is_leader: false,
             #[cfg(debug_assertions)]
             id,
         }
@@ -316,6 +323,7 @@ where
             waiter: Waiting::Idle(waiter),
             inner: InnerCheckoutConnecting::Connected(Some((connection, request))),
             meta,
+            is_leader: false,
             #[cfg(debug_assertions)]
             id,
         }
@@ -338,16 +346,27 @@ where
             waiter: Waiting::Connecting(waiter),
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             meta,
+            is_leader: false,
             #[cfg(debug_assertions)]
             id,
         }
     }
 
+    /// Constructs a checkout which is responsible for establishing a new
+    /// connection on behalf of the manager.
+    ///
+    /// `is_leader` should be `true` exactly when this checkout is the one
+    /// that caused the manager's shared `connecting` flag to be set (i.e.
+    /// other checkouts may be queued up waiting on it). If such a checkout is
+    /// abandoned before its connection attempt finishes, those waiters must
+    /// be released so they can attempt their own connections instead of
+    /// hanging forever.
     pub(super) fn new_idle(
         manager: ManagerRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
         connector: Connector<T, P, R>,
         config: &ConnectionManagerConfig,
+        is_leader: bool,
     ) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
@@ -368,6 +387,7 @@ where
             inner,
 
             meta,
+            is_leader,
             #[cfg(debug_assertions)]
             id,
         }
@@ -443,7 +463,10 @@ where
 
                 match result {
                     Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
-                    Err(e) => Poll::Ready(Err(e)),
+                    Err(e) => {
+                        release_waiters_on_failure(this.manager);
+                        Poll::Ready(Err(e))
+                    }
                 }
             }
             CheckoutConnectingProj::ConnectingWithDelayDrop(Some(connector))
@@ -470,7 +493,10 @@ where
 
                 match result {
                     Ok(connection) => Poll::Ready(Ok(register_connected(this.manager, connection))),
-                    Err(e) => Poll::Ready(Err(e)),
+                    Err(e) => {
+                        release_waiters_on_failure(this.manager);
+                        Poll::Ready(Err(e))
+                    }
                 }
             }
             CheckoutConnectingProj::ConnectingWithDelayDrop(None) => {
@@ -478,6 +504,24 @@ where
                 panic!("connection was stolen from checkout")
             }
         }
+    }
+}
+
+/// Release any other checkouts waiting on this (now failed) connection attempt.
+///
+/// When a checkout is connecting on behalf of the manager (e.g. because it is
+/// expected to produce a connection that can be shared), other checkouts may
+/// be parked in [`Waiting::Connecting`], purely waiting for this attempt to
+/// finish rather than connecting themselves. If this attempt fails, nothing
+/// else will ever complete their waiting channel, so they must be released
+/// here so they can fall back to their own connection attempts.
+fn release_waiters_on_failure<C, B>(managerref: &ManagerRef<C, B>)
+where
+    C: PoolableConnection<B>,
+    B: Send + 'static,
+{
+    if let Some(mut manager) = managerref.lock() {
+        manager.connection_failed();
     }
 }
 
@@ -531,8 +575,26 @@ where
             });
         } else {
             if let Some(mut manager) = self.manager.lock() {
-                // Connection is only cancled when no delayed drop occurs.
-                manager.cancel_connection();
+                // If we are the checkout responsible for the manager's shared
+                // `connecting` flag, and we're being dropped without ever
+                // having finished our connection attempt (successfully or
+                // with an error, both of which transition `inner` to
+                // `Done`), then anyone queued up waiting for us must be
+                // released so they can attempt their own connection instead
+                // of hanging forever on a connection that will never arrive.
+                //
+                // A non-leader (a checkout that was only ever waiting on
+                // someone else) has no such obligation: other waiters may
+                // still be legitimately served by the real leader, so its
+                // drop should only clear its own claim on `connecting`.
+                let abandoned_before_finishing =
+                    !matches!(self.inner, InnerCheckoutConnecting::Done(_));
+
+                if self.is_leader && abandoned_before_finishing {
+                    manager.connection_failed();
+                } else {
+                    manager.cancel_connection();
+                }
             }
             #[cfg(debug_assertions)]
             tracing::trace!(id=%self.id, "drop for checkout");
@@ -553,6 +615,19 @@ mod test {
     #[cfg(feature = "mock")]
     use crate::client::conn::transport::mock::MockTransport;
 
+    #[cfg(feature = "mock")]
+    use crate::client::conn::protocol::mock::{MockRequest, MockSender};
+
+    #[cfg(feature = "mock")]
+    fn mock_pooled() -> Pooled<MockSender, MockRequest> {
+        // Use a shareable connection so that dropping the `Pooled` value in a
+        // plain (non-Tokio) test does not try to spawn a background task.
+        Pooled {
+            connection: Some(MockSender::reusable()),
+            manager: ManagerRef::none(),
+        }
+    }
+
     #[test]
     fn verify_checkout_id() {
         let id = CheckoutId(0);
@@ -565,8 +640,6 @@ mod test {
     #[cfg(feature = "mock")]
     #[tokio::test]
     async fn detatched_checkout() {
-        use crate::client::conn::protocol::mock::MockRequest;
-
         let transport = MockTransport::single();
 
         let checkout = Checkout::detached(transport.connector(MockRequest));
@@ -583,5 +656,168 @@ mod test {
 
         let connection = checkout.await.unwrap();
         assert!(connection.is_open());
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_none_is_immediately_closed() {
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> = Box::pin(Waiting::None);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::Closed)));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_debug_variants() {
+        let none: Waiting<MockSender, MockRequest> = Waiting::None;
+        assert_eq!(format!("{none:?}"), "Nomanager");
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let idle: Waiting<MockSender, MockRequest> = Waiting::Idle(rx);
+        assert_eq!(format!("{idle:?}"), "Idle");
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let connecting: Waiting<MockSender, MockRequest> = Waiting::Connecting(rx);
+        assert_eq!(format!("{connecting:?}"), "Connecting");
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_idle_pending_reports_not_ready_without_closing() {
+        // An `Idle` waiter reports `NotReady` (rather than blocking the whole
+        // future) when its channel is pending, so that the checkout can also
+        // attempt its own connection while it waits.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> = Box::pin(Waiting::Idle(rx));
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::NotReady)));
+        assert!(!tx.is_closed(), "pending idle waiter should stay open");
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_idle_resolves_when_connection_sent() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> = Box::pin(Waiting::Idle(rx));
+
+        assert!(tx.send(mock_pooled()).is_ok());
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::Connected(_))));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_idle_closed_when_sender_dropped() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> = Box::pin(Waiting::Idle(rx));
+
+        drop(tx);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::Closed)));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_connecting_pending_blocks_the_whole_future() {
+        // Unlike `Idle`, a pending `Connecting` waiter blocks the entire
+        // future rather than reporting `NotReady`, since a checkout in this
+        // mode should not attempt its own connection while another is in
+        // progress elsewhere.
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> =
+            Box::pin(Waiting::Connecting(rx));
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(poll.is_pending());
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_connecting_resolves_when_connection_sent() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> =
+            Box::pin(Waiting::Connecting(rx));
+
+        assert!(tx.send(mock_pooled()).is_ok());
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::Connected(_))));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_connecting_closed_when_sender_dropped() {
+        // This is the key recovery path: if the leading connection attempt
+        // fails or is abandoned and releases its waiters, a checkout that was
+        // purely waiting must observe `Closed` so it can fall back to its own
+        // connection attempt.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> =
+            Box::pin(Waiting::Connecting(rx));
+
+        drop(tx);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(poll, Poll::Ready(WaitingPoll::Closed)));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_resets_to_none_once_ready() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        drop(tx);
+        let mut waiting: Pin<Box<Waiting<MockSender, MockRequest>>> =
+            Box::pin(Waiting::Connecting(rx));
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let _ = waiting.as_mut().poll(&mut cx);
+        assert!(matches!(*waiting, Waiting::None));
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_close_marks_receiver_closed_and_resets_to_none() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Pooled<MockSender, MockRequest>>();
+        let mut waiting: Waiting<MockSender, MockRequest> = Waiting::Idle(rx);
+
+        waiting.close();
+
+        assert!(matches!(waiting, Waiting::None));
+        assert!(tx.is_closed());
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn waiting_poll_is_ready_variants() {
+        assert!(WaitingPoll::<MockSender, MockRequest>::Closed.is_ready());
+        assert!(WaitingPoll::<MockSender, MockRequest>::Connected(mock_pooled()).is_ready());
+        assert!(!WaitingPoll::<MockSender, MockRequest>::NotReady.is_ready());
     }
 }

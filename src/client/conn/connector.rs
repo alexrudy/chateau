@@ -758,6 +758,139 @@ mod tests {
         }
 
         #[test]
+        fn test_poll_connector_transport_poll_ready_error() {
+            // The transport fails while polling for readiness, before a
+            // connection attempt is ever made. The notifier must never fire,
+            // since we never even reach the handshake stage.
+            use std::cell::Cell;
+
+            let transport = MockTransport::poll_ready_error();
+            let protocol = MockProtocol::default();
+            let request = MockRequest;
+
+            let mut connector = Box::pin(Connector::new(transport, protocol, request));
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
+
+            let Poll::Ready(Err(error)) = result else {
+                panic!("connector should resolve immediately with an error");
+            };
+            assert!(matches!(error, Error::Connecting(_)));
+            assert!(
+                !notified.get(),
+                "notifier should not fire when the transport never becomes ready"
+            );
+        }
+
+        #[test]
+        fn test_poll_connector_transport_connect_error() {
+            // The transport's readiness check succeeds, but the connection
+            // attempt itself fails. The notifier must never fire, since we
+            // never reach the handshake stage.
+            use std::cell::Cell;
+
+            let transport = MockTransport::error();
+            let protocol = MockProtocol::default();
+            let request = MockRequest;
+
+            let mut connector = Box::pin(Connector::new(transport, protocol, request));
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
+
+            let Poll::Ready(Err(error)) = result else {
+                panic!("connector should resolve immediately with an error");
+            };
+            assert!(matches!(error, Error::Connecting(_)));
+            assert!(
+                !notified.get(),
+                "notifier should not fire when the transport fails to connect"
+            );
+        }
+
+        #[test]
+        fn test_poll_connector_handshake_poll_ready_error() {
+            // The transport connects fine, but the protocol fails while
+            // polling for readiness to perform the handshake. The notifier
+            // must never fire, since multiplexing is never decided.
+            use std::cell::Cell;
+
+            let transport = MockTransport::reusable();
+            let protocol = MockProtocol::new(true).with_ready_error();
+            let request = MockRequest;
+
+            let mut connector = Box::pin(Connector::new(transport, protocol, request));
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
+
+            let Poll::Ready(Err(error)) = result else {
+                panic!("connector should resolve immediately with an error");
+            };
+            assert!(matches!(error, Error::Handshaking(_)));
+            assert!(
+                !notified.get(),
+                "notifier should not fire when the protocol never becomes ready"
+            );
+        }
+
+        #[test]
+        fn test_poll_connector_handshake_future_error() {
+            // The transport connects and the protocol is ready, but the
+            // handshake itself fails. The notifier must fire before the
+            // handshake future resolves, since multiplexing is decided as
+            // soon as the handshake starts.
+            use std::cell::Cell;
+
+            let transport = MockTransport::reusable();
+            let protocol = MockProtocol::new(true).with_handshake_error();
+            let request = MockRequest;
+
+            let mut connector = Box::pin(Connector::new(transport, protocol, request));
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|val| notified.set(val), &mut meta, &mut cx);
+
+            let Poll::Ready(Err(error)) = result else {
+                panic!("connector should resolve immediately with an error");
+            };
+            assert!(matches!(error, Error::Handshaking(_)));
+            assert!(
+                notified.get(),
+                "notifier should fire once the handshake is attempted, even if it fails"
+            );
+        }
+
+        #[test]
         fn test_connector_debug() {
             let transport = MockTransport::single();
             let protocol = MockProtocol::default();

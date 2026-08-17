@@ -114,6 +114,8 @@ pub struct MockProtocolError {
 pub struct MockProtocol {
     multiplex: bool,
     multiplex_ready: Option<bool>,
+    fail_ready: bool,
+    fail_handshake: bool,
     _private: (),
 }
 
@@ -123,6 +125,8 @@ impl MockProtocol {
         Self {
             multiplex,
             multiplex_ready: None,
+            fail_ready: false,
+            fail_handshake: false,
             _private: (),
         }
     }
@@ -139,6 +143,22 @@ impl MockProtocol {
         self.multiplex_ready = Some(multiplex_ready);
         self
     }
+
+    /// Makes [`Protocol::poll_ready`] return an error, simulating a protocol
+    /// that fails before it ever attempts the handshake (e.g. because setup
+    /// state is unavailable).
+    pub fn with_ready_error(mut self) -> Self {
+        self.fail_ready = true;
+        self
+    }
+
+    /// Makes the handshake future returned by [`Protocol::connect`] resolve
+    /// to an error, simulating a protocol that fails during the handshake
+    /// itself, after the transport has already connected.
+    pub fn with_handshake_error(mut self) -> Self {
+        self.fail_handshake = true;
+        self
+    }
 }
 
 impl tower::Service<MockStream> for MockProtocol {
@@ -151,10 +171,16 @@ impl tower::Service<MockStream> for MockProtocol {
         &mut self,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
+        if self.fail_ready {
+            return std::task::Poll::Ready(Err(MockError));
+        }
         std::task::Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: MockStream) -> Self::Future {
+        if self.fail_handshake {
+            return ready(Err(MockError));
+        }
         ready(Ok(MockSender {
             id: StreamID::new(),
             stream: req,
@@ -338,6 +364,30 @@ mod tests {
         // that it can share, the explicit override wins.
         let shareable = MockStream::reusable();
         assert!(!Protocol::multiplex_ready(&protocol, &shareable));
+    }
+
+    #[test]
+    fn test_mock_protocol_with_ready_error() {
+        use tower::Service;
+
+        let mut protocol = MockProtocol::new(true).with_ready_error();
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let result = Service::poll_ready(&mut protocol, &mut cx);
+        assert!(matches!(result, Poll::Ready(Err(MockError))));
+    }
+
+    #[tokio::test]
+    async fn test_mock_protocol_with_handshake_error() {
+        use tower::Service;
+
+        let mut protocol = MockProtocol::new(true).with_handshake_error();
+        let stream = MockStream::reusable();
+
+        let result = protocol.call(stream).await;
+        assert!(matches!(result, Err(MockError)));
     }
 
     #[test]
