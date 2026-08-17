@@ -419,10 +419,27 @@ where
             // Open questions: Should we check the manager for a different connection when the
             // waiter is pending? Probably not, ideally our semantics should keep the manager
             // from containing multiple connections if they can be multiplexed.
+
+            // If we were purely waiting behind someone else's connection
+            // attempt (rather than also driving our own), remember that here
+            // so we can tell, below, whether our waiter closing means we are
+            // now the one responsible for driving a connection attempt.
+            let was_following = matches!(*this.waiter, Waiting::Connecting(_));
+
             if let WaitingPoll::Connected(connection) = ready!(this.waiter.as_mut().poll(cx)) {
                 debug!("connection recieved from waiter");
 
                 return Poll::Ready(Ok(connection));
+            }
+
+            if was_following {
+                // Whoever we were waiting behind gave up (failed, or was
+                // abandoned) without ever delivering a connection to us. We
+                // are now the one attempting a connection on everyone's
+                // behalf: if we, in turn, fail or are abandoned, we must
+                // release the next waiter in line ourselves.
+                trace!("promoted from waiting to attempting our own connection");
+                *this.is_leader = true;
             }
         }
 
@@ -574,23 +591,30 @@ where
                 }
             });
         } else {
-            if let Some(mut manager) = self.manager.lock() {
-                // If we are the checkout responsible for the manager's shared
-                // `connecting` flag, and we're being dropped without ever
-                // having finished our connection attempt (successfully or
-                // with an error, both of which transition `inner` to
-                // `Done`), then anyone queued up waiting for us must be
-                // released so they can attempt their own connection instead
-                // of hanging forever on a connection that will never arrive.
-                //
-                // A non-leader (a checkout that was only ever waiting on
-                // someone else) has no such obligation: other waiters may
-                // still be legitimately served by the real leader, so its
-                // drop should only clear its own claim on `connecting`.
-                let abandoned_before_finishing =
-                    !matches!(self.inner, InnerCheckoutConnecting::Done(_));
+            // If we are the checkout responsible for the manager's shared
+            // `connecting` flag, and we're being dropped without ever
+            // having finished our connection attempt (successfully or
+            // with an error, both of which transition `inner` to `Done`),
+            // then anyone queued up waiting for us must be released so they
+            // can attempt their own connection instead of hanging forever
+            // on a connection that will never arrive.
+            //
+            // A non-leader (a checkout that was only ever waiting on someone
+            // else) has no such obligation: other waiters may still be
+            // legitimately served by the real leader, so its drop should
+            // only clear its own claim on `connecting`.
+            let abandoned_before_finishing =
+                !matches!(self.inner, InnerCheckoutConnecting::Done(_));
+            let is_leader = self.is_leader;
 
-                if self.is_leader && abandoned_before_finishing {
+            // Close our own waiter first. Otherwise, if we're the leader and
+            // end up releasing the next waiter below, we could mistake our
+            // own (still technically open) entry in the queue for one that
+            // actually needs releasing, wasting the release on ourselves.
+            self.as_mut().project().waiter.close();
+
+            if let Some(mut manager) = self.manager.lock() {
+                if is_leader && abandoned_before_finishing {
                     manager.connection_failed();
                 } else {
                     manager.cancel_connection();

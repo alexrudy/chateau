@@ -180,16 +180,34 @@ where
 
     /// Mark the in-progress connection attempt as having failed.
     ///
-    /// Any checkouts that were waiting for this connection attempt (because
-    /// it looked like it could be shared) can not be served by it any more,
-    /// so they must be released to either wait for a different connection or
-    /// attempt their own connection. Dropping their `Sender` half here wakes
-    /// each waiting checkout, so they make forward progress instead of
-    /// hanging forever on a connection attempt that will never complete.
+    /// The checkouts that were waiting for this connection attempt (because
+    /// it looked like it could be shared) can not be served by it any more.
+    /// Rather than releasing all of them at once -- which would turn a
+    /// single failure into a thundering herd of simultaneous connection
+    /// attempts -- this releases exactly one of them (dropping its `Sender`
+    /// wakes it, so it can attempt its own connection) and leaves the rest
+    /// queued up behind it, as if it were the new leader. If that one also
+    /// fails or is abandoned, its own call to this method releases the next
+    /// one in turn, and so on, until either someone succeeds (waking
+    /// everyone still queued via `push`) or the queue is exhausted.
     pub(in crate::client) fn connection_failed(&mut self) {
-        trace!(waiters=%self.waiting.len(), "connection attempt failed, releasing waiters");
+        while let Some(waiter) = self.waiting.pop_front() {
+            if waiter.is_closed() {
+                // Already abandoned, e.g. this is our own waiter (already
+                // closed above, before we got here) or a waiter belonging to
+                // a checkout that has already given up.
+                continue;
+            }
+
+            trace!("connection attempt failed, releasing next waiter in line");
+            // Leave `connecting` set: whoever we just released is now
+            // effectively the leader that everyone else still in the queue
+            // is waiting behind. Dropping `waiter` here closes its receiver.
+            return;
+        }
+
+        trace!("connection attempt failed, no other waiters remain");
         self.connecting = false;
-        self.waiting.clear();
     }
 
     /// Mark a connection as connected, but not done with the handshake.
@@ -655,6 +673,88 @@ mod tests {
             .expect("follower task should not panic");
 
         assert!(follower_result.unwrap().is_open());
+    }
+
+    /// When a connection attempt fails with multiple checkouts queued up
+    /// behind it, only one of them should be released to attempt its own
+    /// connection; the rest should remain queued behind that one, as if it
+    /// were the new leader. This avoids turning a single failure into a
+    /// thundering herd of simultaneous connection attempts. If that newly
+    /// released checkout also fails, it releases the next one in turn.
+    #[tokio::test]
+    async fn checkout_connection_failure_releases_one_waiter_at_a_time() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+        });
+
+        let (leader_tx, leader_rx) = tokio::sync::oneshot::channel();
+        let (follower_a_tx, follower_a_rx) = tokio::sync::oneshot::channel();
+
+        let mut leader = std::pin::pin!(
+            manager.checkout(MockTransport::channel(leader_rx).connector(MockRequest))
+        );
+        assert!(futures::poll!(&mut leader).is_pending());
+
+        let mut follower_a = std::pin::pin!(
+            manager.checkout(MockTransport::channel(follower_a_rx).connector(MockRequest))
+        );
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        let mut follower_b =
+            std::pin::pin!(manager.checkout(MockTransport::reusable().connector(MockRequest)));
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            3,
+            "leader and both followers should be queued waiting"
+        );
+
+        // Fail the leader. Only `follower_a` should be released to attempt
+        // its own connection; `follower_b` must remain queued.
+        drop(leader_tx);
+        let leader_result = leader.await;
+        assert!(leader_result.is_err(), "leader should fail to connect");
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            1,
+            "only follower_b should remain queued after the leader fails"
+        );
+
+        // `follower_b` must still be untouched: nobody has released it yet,
+        // so it should still just be waiting, not attempting its own
+        // connection (which would resolve immediately for a reusable mock
+        // transport).
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // `follower_a` has been promoted and should now be driving its own
+        // (still-blocked) connection attempt, rather than resolving.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        // Fail `follower_a`'s own connection attempt too. This should, in
+        // turn, release `follower_b`.
+        drop(follower_a_tx);
+        let follower_a_result = follower_a.await;
+        assert!(
+            follower_a_result.is_err(),
+            "follower_a should fail to connect"
+        );
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            0,
+            "follower_b should have been released after follower_a also failed"
+        );
+
+        let follower_b_result = tokio::time::timeout(Duration::from_secs(1), follower_b)
+            .await
+            .expect("follower_b should not hang once released");
+        assert!(follower_b_result.unwrap().is_open());
     }
 
     /// If the protocol eagerly reports that it can multiplex, but once
