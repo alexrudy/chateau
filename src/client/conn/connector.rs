@@ -283,18 +283,25 @@ where
 
                     let info = stream.info();
 
-                    let future = protocol
+                    let protocol = protocol
                         .as_mut()
-                        .expect("future polled in invalid state: protocol is None")
-                        .connect(stream);
+                        .expect("future polled in invalid state: protocol is None");
 
-                    if *connector_projected.multiplex {
+                    // Ask the protocol whether it will multiplex on this specific
+                    // connection now that the transport has produced a connected
+                    // stream (and, e.g., completed any TLS/ALPN negotiation). This
+                    // can differ from the eager, pre-connect answer cached in
+                    // `self.multiplex`.
+                    let multiplex = protocol.multiplex_ready(&stream);
+                    let future = protocol.connect(stream);
+
+                    if multiplex {
                         if let Some(notifier) = notifier.take() {
                             notifier();
                         }
                     }
 
-                    tracing::trace!("handshake ready");
+                    tracing::trace!(multiplex, "handshake ready");
 
                     connector_projected
                         .state
@@ -667,6 +674,85 @@ mod tests {
 
             assert!(!connector.multiplex);
             assert!(connector.request.is_some());
+        }
+
+        #[test]
+        fn test_poll_connector_multiplex_ready_overrides_eager_multiplex() {
+            use std::cell::Cell;
+
+            // The eager, pre-connect answer says "don't block others" (multiplex
+            // = false), but the protocol decides -- once it has a connected
+            // stream -- that it can in fact multiplex (e.g. because ALPN
+            // negotiated something shareable).
+            let transport = MockTransport::reusable();
+            let protocol = MockProtocol::new(false).with_multiplex_ready(true);
+            let request = MockRequest;
+
+            let connector = Connector::new(transport, protocol, request);
+            assert!(
+                !connector.multiplex(),
+                "eager multiplex answer should be false"
+            );
+
+            let mut connector = Box::pin(connector);
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|| notified.set(true), &mut meta, &mut cx);
+
+            let Poll::Ready(connection) = result else {
+                panic!("connector should resolve immediately for the mock transport/protocol");
+            };
+            assert!(connection.is_ok());
+            assert!(
+                notified.get(),
+                "notifier should fire based on multiplex_ready, not the eager multiplex() answer"
+            );
+        }
+
+        #[test]
+        fn test_poll_connector_multiplex_ready_can_suppress_eager_multiplex() {
+            use std::cell::Cell;
+
+            // The eager answer optimistically says "block others" (multiplex =
+            // true), but once connected, the protocol decides it cannot
+            // actually multiplex this particular stream.
+            let transport = MockTransport::reusable();
+            let protocol = MockProtocol::new(true).with_multiplex_ready(false);
+            let request = MockRequest;
+
+            let connector = Connector::new(transport, protocol, request);
+            assert!(
+                connector.multiplex(),
+                "eager multiplex answer should be true"
+            );
+
+            let mut connector = Box::pin(connector);
+            let mut meta = ConnectorMeta::new();
+            let notified = Cell::new(false);
+
+            let waker = std::task::Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let result =
+                connector
+                    .as_mut()
+                    .poll_connector(|| notified.set(true), &mut meta, &mut cx);
+
+            let Poll::Ready(connection) = result else {
+                panic!("connector should resolve immediately for the mock transport/protocol");
+            };
+            assert!(connection.is_ok());
+            assert!(
+                !notified.get(),
+                "notifier should not fire when multiplex_ready overrides the eager answer to false"
+            );
         }
 
         #[test]

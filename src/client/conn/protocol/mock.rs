@@ -8,7 +8,7 @@ use crate::client::conn::Connection;
 use crate::client::conn::stream::mock::{MockStream, StreamID};
 use crate::client::pool::{PoolableConnection, PoolableStream};
 
-use super::Multiplexed;
+use super::Protocol;
 
 /// Fake request
 #[derive(Debug)]
@@ -113,6 +113,7 @@ pub struct MockProtocolError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MockProtocol {
     multiplex: bool,
+    multiplex_ready: Option<bool>,
     _private: (),
 }
 
@@ -121,14 +122,22 @@ impl MockProtocol {
     pub fn new(multiplex: bool) -> Self {
         Self {
             multiplex,
+            multiplex_ready: None,
             _private: (),
         }
     }
-}
 
-impl Multiplexed for MockProtocol {
-    fn multiplex(&self) -> bool {
-        self.multiplex
+    /// Overrides the answer returned by [`Protocol::multiplex_ready`],
+    /// regardless of what the connected stream reports via
+    /// [`PoolableStream::can_share`].
+    ///
+    /// This is useful for simulating protocols whose multiplexing decision
+    /// can only be made once the transport is connected (e.g. ALPN
+    /// negotiation over TLS), and which may report a different answer than
+    /// [`Protocol::multiplex`] gave before connecting.
+    pub fn with_multiplex_ready(mut self, multiplex_ready: bool) -> Self {
+        self.multiplex_ready = Some(multiplex_ready);
+        self
     }
 }
 
@@ -150,6 +159,36 @@ impl tower::Service<MockStream> for MockProtocol {
             id: StreamID::new(),
             stream: req,
         }))
+    }
+}
+
+impl Protocol<MockStream, MockRequest> for MockProtocol {
+    type Error = MockError;
+    type Connection = MockSender;
+    type Future = Ready<Result<MockSender, MockError>>;
+
+    fn connect(
+        &mut self,
+        transport: MockStream,
+    ) -> <Self as Protocol<MockStream, MockRequest>>::Future {
+        tower::Service::call(self, transport)
+    }
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), <Self as Protocol<MockStream, MockRequest>>::Error>> {
+        tower::Service::poll_ready(self, cx)
+    }
+
+    fn multiplex(&self) -> bool {
+        self.multiplex
+    }
+
+    /// Falls back to the connected stream's [`PoolableStream::can_share`] when
+    /// no explicit override has been set with [`MockProtocol::with_multiplex_ready`].
+    fn multiplex_ready(&self, io: &MockStream) -> bool {
+        self.multiplex_ready.unwrap_or_else(|| io.can_share())
     }
 }
 
@@ -266,6 +305,39 @@ mod tests {
 
         let reused = sender.reuse();
         assert!(reused.is_some());
+    }
+
+    #[test]
+    fn test_mock_protocol_multiplex_ready_default_uses_stream() {
+        let protocol = MockProtocol::new(false);
+
+        let shareable = MockStream::reusable();
+        assert!(Protocol::multiplex_ready(&protocol, &shareable));
+
+        let single_use = MockStream::single();
+        assert!(!Protocol::multiplex_ready(&protocol, &single_use));
+    }
+
+    #[test]
+    fn test_mock_protocol_multiplex_ready_can_diverge_from_multiplex() {
+        let protocol = MockProtocol::new(true);
+        assert!(Protocol::multiplex(&protocol));
+
+        // The eager answer optimistically assumed multiplexing, but the actual
+        // connected stream reports it cannot be shared.
+        let single_use = MockStream::single();
+        assert!(!Protocol::multiplex_ready(&protocol, &single_use));
+    }
+
+    #[test]
+    fn test_mock_protocol_multiplex_ready_override() {
+        let protocol = MockProtocol::new(true).with_multiplex_ready(false);
+        assert!(Protocol::multiplex(&protocol));
+
+        // Even though the eager answer is `true` and the stream itself reports
+        // that it can share, the explicit override wins.
+        let shareable = MockStream::reusable();
+        assert!(!Protocol::multiplex_ready(&protocol, &shareable));
     }
 
     #[test]
