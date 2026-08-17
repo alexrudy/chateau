@@ -1,6 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use std::task::Context;
 use std::task::Poll;
@@ -8,7 +9,10 @@ use std::task::ready;
 
 use pin_project::pin_project;
 use pin_project::pinned_drop;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 use tokio::sync::oneshot::Receiver;
+use tokio_util::sync::PollSemaphore;
 use tracing::debug;
 use tracing::trace;
 
@@ -192,6 +196,60 @@ where
     }
 }
 
+/// Tracks whether this checkout needs to (or already has) acquired a
+/// permit from the connection manager's limit on simultaneous connection
+/// attempts, if one is configured.
+enum Permit {
+    /// No limit is configured for this manager, or a permit is not
+    /// required at all (e.g. this checkout is not tied to a manager, or
+    /// already has a connection and will never drive a connector).
+    Unbounded,
+    /// Waiting to acquire a permit before starting or continuing to poll
+    /// our connection attempt.
+    Acquiring(PollSemaphore),
+    /// Currently holds a permit for our in-progress connection attempt.
+    /// The permit itself is never read; it is held only so that dropping it
+    /// (when we release, or when the whole checkout is dropped) returns the
+    /// slot to the semaphore.
+    Acquired(#[allow(dead_code)] OwnedSemaphorePermit),
+}
+
+impl Permit {
+    fn new(limit: Option<Arc<Semaphore>>) -> Self {
+        match limit {
+            Some(semaphore) => Permit::Acquiring(PollSemaphore::new(semaphore)),
+            None => Permit::Unbounded,
+        }
+    }
+
+    /// Ensure a permit is held before continuing to poll a connection
+    /// attempt, acquiring one from the manager's semaphore if necessary.
+    fn poll_acquire(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        loop {
+            match self {
+                Permit::Unbounded | Permit::Acquired(_) => return Poll::Ready(()),
+                Permit::Acquiring(semaphore) => match semaphore.poll_acquire(cx) {
+                    Poll::Ready(Some(permit)) => *self = Permit::Acquired(permit),
+                    Poll::Ready(None) => {
+                        // The semaphore was closed. We never close it
+                        // ourselves, so this should not happen in practice,
+                        // but fall back to treating the attempt as
+                        // unbounded rather than hanging forever.
+                        *self = Permit::Unbounded;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+            }
+        }
+    }
+
+    /// Release any held (or pending) permit once a connection attempt has
+    /// concluded, successfully or not.
+    fn release(&mut self) {
+        *self = Permit::Unbounded;
+    }
+}
+
 /// A checkout of a connection from a connection manager.
 #[pin_project(PinnedDrop)]
 pub struct Checkout<T, P, R>
@@ -212,6 +270,9 @@ where
     /// queued up waiting behind). Only such a checkout should release those
     /// waiters if it is abandoned before its connection attempt finishes.
     is_leader: bool,
+    /// Tracks the permit for the manager's limit on simultaneous connection
+    /// attempts, if one is configured.
+    permit: Permit,
     #[cfg(debug_assertions)]
     id: CheckoutId,
 }
@@ -252,6 +313,10 @@ where
                     inner: InnerCheckoutConnecting::ConnectingDelayed(connector.take().unwrap()),
                     meta: ConnectorMeta::new(), // New meta to avoid holding spans in the spawned task
                     is_leader: *this.is_leader,
+                    // Carry over whatever permit state we already have (held
+                    // or still being acquired): this is the same connection
+                    // attempt continuing in the background, not a new one.
+                    permit: std::mem::replace(this.permit, Permit::Unbounded),
                     #[cfg(debug_assertions)]
                     id: *this.id,
                 })
@@ -302,6 +367,9 @@ where
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             meta: ConnectorMeta::new(),
             is_leader: false,
+            // A detached checkout has no manager, and so no shared limit on
+            // simultaneous connection attempts to observe.
+            permit: Permit::Unbounded,
             #[cfg(debug_assertions)]
             id,
         }
@@ -324,15 +392,27 @@ where
             inner: InnerCheckoutConnecting::Connected(Some((connection, request))),
             meta,
             is_leader: false,
+            // We already have a connection; we will never drive a
+            // connector, so there is nothing to acquire a permit for.
+            permit: Permit::Unbounded,
             #[cfg(debug_assertions)]
             id,
         }
     }
 
+    /// Constructs a checkout which is only waiting behind another
+    /// checkout's connection attempt, but carries its own connector in case
+    /// it needs to fall back to attempting a connection itself.
+    ///
+    /// `connecting_permits` should be the manager's limit (if any) on
+    /// simultaneous connection attempts: if this checkout is later released
+    /// from waiting and must attempt its own connection, it will first
+    /// acquire a permit, just as the original leader would have.
     pub(super) fn new_connecting(
         manager: ManagerRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
         connector: Connector<T, P, R>,
+        connecting_permits: Option<Arc<Semaphore>>,
     ) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
@@ -347,6 +427,7 @@ where
             inner: InnerCheckoutConnecting::Connecting(Box::pin(connector)),
             meta,
             is_leader: false,
+            permit: Permit::new(connecting_permits),
             #[cfg(debug_assertions)]
             id,
         }
@@ -361,12 +442,17 @@ where
     /// abandoned before its connection attempt finishes, those waiters must
     /// be released so they can attempt their own connections instead of
     /// hanging forever.
+    ///
+    /// `connecting_permits` is the manager's limit (if any) on simultaneous
+    /// connection attempts; a permit will be acquired from it before this
+    /// checkout actually starts driving its connector.
     pub(super) fn new_idle(
         manager: ManagerRef<P::Connection, R>,
         waiter: Receiver<Pooled<P::Connection, R>>,
         connector: Connector<T, P, R>,
         config: &ConnectionManagerConfig,
         is_leader: bool,
+        connecting_permits: Option<Arc<Semaphore>>,
     ) -> Self {
         #[cfg(debug_assertions)]
         let id = CheckoutId::new();
@@ -388,6 +474,7 @@ where
 
             meta,
             is_leader,
+            permit: Permit::new(connecting_permits),
             #[cfg(debug_assertions)]
             id,
         }
@@ -458,6 +545,8 @@ where
                 Poll::Ready(Ok(register_connected(this.manager, connection)))
             }
             CheckoutConnectingProj::Connecting(connector) => {
+                ready!(this.permit.poll_acquire(cx));
+
                 let result = ready!(connector.as_mut().poll_connector(
                     {
                         let manager = this.manager.clone();
@@ -475,6 +564,7 @@ where
                 ));
 
                 this.waiter.close();
+                this.permit.release();
                 let request = connector.as_mut().take_request_pinned();
                 this.inner.set(InnerCheckoutConnecting::Done(Some(request)));
 
@@ -488,6 +578,8 @@ where
             }
             CheckoutConnectingProj::ConnectingWithDelayDrop(Some(connector))
             | CheckoutConnectingProj::ConnectingDelayed(connector) => {
+                ready!(this.permit.poll_acquire(cx));
+
                 let result = ready!(connector.as_mut().poll_connector(
                     {
                         let manager = this.manager.clone();
@@ -505,6 +597,7 @@ where
                 ));
 
                 this.waiter.close();
+                this.permit.release();
                 let request = connector.as_mut().take_request_pinned();
                 this.inner.set(InnerCheckoutConnecting::Done(Some(request)));
 

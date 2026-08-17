@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio::sync::oneshot::Sender;
 use tracing::trace;
 
@@ -37,6 +38,15 @@ pub struct ConnectionManagerConfig {
 
     /// Should in-progress connections continue after they get pre-empted by a new connection?
     pub continue_after_preemption: bool,
+
+    /// The maximum number of simultaneous connection attempts to this host.
+    ///
+    /// This bounds how many connectors may be actively connecting at once,
+    /// regardless of how many checkouts are queued up. It is similar in
+    /// spirit to [`max_idle_per_host`](Self::max_idle_per_host), but may
+    /// reasonably be set larger, since it limits work in progress rather
+    /// than connections held open at rest. `None` means there is no limit.
+    pub max_connecting_per_host: Option<usize>,
 }
 
 impl Default for ConnectionManagerConfig {
@@ -45,6 +55,7 @@ impl Default for ConnectionManagerConfig {
             idle_timeout: Some(Duration::from_secs(90)),
             max_idle_per_host: 32,
             continue_after_preemption: true,
+            max_connecting_per_host: None,
         }
     }
 }
@@ -108,6 +119,10 @@ where
     waiting: VecDeque<Sender<Pooled<C, R>>>,
     idle: IdleConnections<C, R>,
     config: Arc<ConnectionManagerConfig>,
+    /// Limits the number of simultaneous connection attempts to this host.
+    /// `None` when [`ConnectionManagerConfig::max_connecting_per_host`] is
+    /// unset, meaning there is no limit.
+    connecting_permits: Option<Arc<Semaphore>>,
 }
 
 impl<C, R> InnerConnectionManager<C, R>
@@ -117,11 +132,17 @@ where
 {
     /// Creates a new connection manager with the given configuration.
     fn new(config: impl Into<Arc<ConnectionManagerConfig>>) -> ArcMutex<Self> {
+        let config = config.into();
+        let connecting_permits = config
+            .max_connecting_per_host
+            .map(|limit| Arc::new(Semaphore::new(limit)));
+
         ArcMutex::new(Self {
             connecting: false,
             waiting: VecDeque::new(),
             idle: IdleConnections::default(),
-            config: config.into(),
+            config,
+            connecting_permits,
         })
     }
 
@@ -147,7 +168,12 @@ where
 
         if manager.connecting {
             trace!("connection in progress elsewhere, will wait");
-            Checkout::new_connecting(manager.downgrade(), rx, connector)
+            Checkout::new_connecting(
+                manager.downgrade(),
+                rx,
+                connector,
+                manager.connecting_permits.clone(),
+            )
         } else {
             // If we're about to block other connection attempts behind this
             // one, this checkout becomes the "leader" responsible for that
@@ -166,6 +192,7 @@ where
                 connector,
                 &manager.config,
                 is_leader,
+                manager.connecting_permits.clone(),
             )
         }
     }
@@ -299,6 +326,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = manager
@@ -337,6 +365,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = manager
@@ -374,6 +403,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -406,6 +436,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = MockSender::single();
@@ -436,6 +467,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn_first = MockSender::single();
@@ -478,6 +510,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let start = manager.checkout(MockTransport::reusable().connector(MockRequest));
@@ -497,6 +530,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest));
@@ -514,6 +548,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let checkout = manager.checkout(MockTransport::error().connector(MockRequest));
@@ -531,6 +566,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
         let other = manager.clone();
 
@@ -570,6 +606,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: true,
+            ..Default::default()
         });
 
         let conn = manager
@@ -603,6 +640,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
@@ -647,6 +685,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
@@ -689,6 +728,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (leader_tx, leader_rx) = tokio::sync::oneshot::channel();
@@ -769,6 +809,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let leader_connector = Connector::new(
@@ -818,6 +859,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (_stream_tx, stream_rx) = tokio::sync::oneshot::channel();
@@ -858,6 +900,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
@@ -890,5 +933,136 @@ mod tests {
             leader_conn.id(),
             "follower_b should still share the leader's connection despite follower_a's drop"
         );
+    }
+
+    /// `max_connecting_per_host` should bound how many connectors are
+    /// actively attempting a connection at once, even when nothing else
+    /// would otherwise make them wait behind one another (e.g. because they
+    /// are not multiplexable, so each would normally become its own
+    /// independent leader).
+    #[tokio::test]
+    async fn checkout_limits_simultaneous_connection_attempts() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            max_connecting_per_host: Some(1),
+            ..Default::default()
+        });
+
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+
+        let connector_a = Connector::new(
+            MockTransport::channel(rx_a),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+        let connector_b = Connector::new(
+            MockTransport::single(),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+
+        let mut checkout_a = std::pin::pin!(manager.checkout(connector_a));
+        let mut checkout_b = std::pin::pin!(manager.checkout(connector_b));
+
+        // Neither connection is multiplexable, so absent the semaphore both
+        // would be independent "leaders" free to connect simultaneously.
+        // checkout_a acquires the only permit and then blocks on its own
+        // (channel-controlled) transport.
+        assert!(futures::poll!(&mut checkout_a).is_pending());
+
+        // checkout_b's transport (`MockTransport::single`) resolves
+        // immediately once polled -- as proven by other tests -- so the
+        // only reason it can still be `Pending` here is that it could not
+        // acquire a permit.
+        assert!(futures::poll!(&mut checkout_b).is_pending());
+
+        // Finish checkout_a, releasing its permit.
+        assert!(tx_a.send(MockStream::single()).is_ok());
+        let conn_a = checkout_a.await.unwrap();
+        assert!(conn_a.is_open());
+
+        // Now that a permit is free, checkout_b should be able to acquire
+        // it and complete right away.
+        let conn_b = tokio::time::timeout(Duration::from_secs(1), checkout_b)
+            .await
+            .expect("checkout_b should proceed once a permit frees up")
+            .unwrap();
+        assert!(conn_b.is_open());
+    }
+
+    /// When a non-shareable leader releases its entire queue of waiters at
+    /// once (see `checkout_multiplex_ready_false_releases_waiters`), the
+    /// connecting-attempt semaphore should still ensure that only one of
+    /// them actually drives a connection attempt at a time.
+    #[tokio::test]
+    async fn checkout_connecting_limit_throttles_full_queue_release() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            max_connecting_per_host: Some(1),
+            ..Default::default()
+        });
+
+        let leader_connector = Connector::new(
+            MockTransport::reusable(),
+            MockProtocol::new(true).with_multiplex_ready(false),
+            MockRequest,
+        );
+        let leader = manager.checkout(leader_connector);
+
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel();
+
+        let follower_a_connector = Connector::new(
+            MockTransport::channel(rx_a),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+        let follower_b_connector = Connector::new(
+            MockTransport::channel(rx_b),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+
+        let mut follower_a = std::pin::pin!(manager.checkout(follower_a_connector));
+        let mut follower_b = std::pin::pin!(manager.checkout(follower_b_connector));
+
+        // Both followers are queued behind the leader, which is still
+        // eagerly claiming it can be shared.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // The leader succeeds, but turns out not to be shareable, so
+        // `connected_in_handshake(false)` releases both followers at once.
+        let leader_conn = leader.await.unwrap();
+        assert!(leader_conn.is_open());
+
+        // follower_a acquires the only permit, then blocks on its own
+        // (channel-controlled) transport.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        // follower_b was released at the same time as follower_a, but must
+        // still be unable to proceed, since the one permit is already held.
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // Finish follower_a, releasing its permit.
+        assert!(tx_a.send(MockStream::single()).is_ok());
+        let conn_a = follower_a.await.unwrap();
+        assert!(conn_a.is_open());
+
+        // Now follower_b should be able to acquire the freed permit.
+        assert!(tx_b.send(MockStream::single()).is_ok());
+        let conn_b = tokio::time::timeout(Duration::from_secs(1), follower_b)
+            .await
+            .expect("follower_b should proceed once a permit frees up")
+            .unwrap();
+        assert!(conn_b.is_open());
     }
 }

@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"], optional = true}
 socket2 = { version = "0.6" }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "net", "io-util"] }
-tokio-util = { version = "0.7", features = ["codec"], optional = true }
+tokio-util = { version = "0.7", optional = true }
 tracing = { version = "^0.1" }
 
 [dependencies.tower]
@@ -60,7 +60,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 [features]
 default = ["client", "server", "duplex"]
 docs = []
-client = ["happy_eyeballs", "dep:thiserror", "dep:futures", "dep:parking_lot"]
+client = ["happy_eyeballs", "dep:thiserror", "dep:futures", "dep:parking_lot", "dep:tokio-util"]
 server = ["dep:thiserror"]
 mock = ["dep:futures"]
 codec = ["tokio-util/codec", "dep:futures", "dep:parking_lot"]
