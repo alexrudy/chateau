@@ -145,10 +145,10 @@ where
             WaitingProjected::None => Poll::Ready(WaitingPoll::Closed),
         };
 
-        if let Poll::Ready(p) = &polled
-            && p.is_ready()
-        {
-            self.as_mut().set(Waiting::None);
+        if let Poll::Ready(p) = &polled {
+            if p.is_ready() {
+                self.as_mut().set(Waiting::None);
+            }
         };
 
         polled
