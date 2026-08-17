@@ -21,6 +21,7 @@ enum TransportMode {
     SingleUse,
     Reusable,
     ConnectionError,
+    PollReadyError,
     Channel(Option<tokio::sync::oneshot::Receiver<MockStream>>),
 }
 
@@ -56,6 +57,7 @@ impl Clone for MockTransport {
                 TransportMode::SingleUse => TransportMode::SingleUse,
                 TransportMode::Reusable => TransportMode::Reusable,
                 TransportMode::ConnectionError => TransportMode::ConnectionError,
+                TransportMode::PollReadyError => TransportMode::PollReadyError,
             },
         }
     }
@@ -86,6 +88,14 @@ impl MockTransport {
     pub fn error() -> Self {
         Self {
             mode: TransportMode::ConnectionError,
+        }
+    }
+
+    /// Transport which returns an error while polling for readiness, before a
+    /// connection attempt is ever made.
+    pub fn poll_ready_error() -> Self {
+        Self {
+            mode: TransportMode::PollReadyError,
         }
     }
 
@@ -122,6 +132,9 @@ impl<Req> tower::Service<Req> for MockTransport {
         &mut self,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
+        if matches!(self.mode, TransportMode::PollReadyError) {
+            return std::task::Poll::Ready(Err(MockConnectionError));
+        }
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -129,7 +142,9 @@ impl<Req> tower::Service<Req> for MockTransport {
         let reuse = match &mut self.mode {
             TransportMode::SingleUse => false,
             TransportMode::Reusable => true,
-            TransportMode::ConnectionError => return Box::pin(ready(Err(MockConnectionError))),
+            TransportMode::ConnectionError | TransportMode::PollReadyError => {
+                return Box::pin(ready(Err(MockConnectionError)));
+            }
             TransportMode::Channel(rx) => {
                 if let Some(rx) = rx.take() {
                     return Box::pin(async move {
@@ -160,4 +175,32 @@ mod tests {
 
     assert_impl_all!(MockConnectionError: std::error::Error, Send, Sync);
     assert_impl_all!(MockTransport: Transport<()>);
+
+    #[test]
+    fn test_poll_ready_error_fails_before_connecting() {
+        use tower::Service;
+
+        let mut transport = MockTransport::poll_ready_error();
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        let poll_result = Service::<()>::poll_ready(&mut transport, &mut cx);
+        assert!(matches!(poll_result, Poll::Ready(Err(MockConnectionError))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_ready_error_clone() {
+        use tower::Service;
+
+        let transport = MockTransport::poll_ready_error();
+        let mut cloned = transport.clone();
+
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        assert!(matches!(
+            Service::<()>::poll_ready(&mut cloned, &mut cx),
+            Poll::Ready(Err(MockConnectionError))
+        ));
+    }
 }

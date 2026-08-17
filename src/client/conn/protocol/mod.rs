@@ -63,8 +63,35 @@ where
     ) -> std::task::Poll<Result<(), <Self as Protocol<IO, Req>>::Error>>;
 
     /// Can this protocol multiplex on the same connection?
+    ///
+    /// This is an optimistic, pre-connection answer: it is checked before the
+    /// transport has started connecting, and if it returns `true`, other
+    /// connection attempts to the same destination will wait for this one to
+    /// complete its handshake instead of dialing in parallel.
+    ///
+    /// Protocols which don't know the answer without more information (e.g. a
+    /// protocol which negotiates HTTP/1.1 vs. HTTP/2 over TLS via ALPN) should
+    /// return `false` here, and give a definitive answer from
+    /// [`Protocol::multiplex_ready`] instead.
     fn multiplex(&self) -> bool {
         false
+    }
+
+    /// Can this protocol multiplex on this specific connection, now that the
+    /// transport has produced a connected stream?
+    ///
+    /// This is called once, after the transport has connected (and completed
+    /// any transport-level handshake of its own, such as a TLS handshake with
+    /// ALPN negotiation), but before the protocol handshake begins. It gives
+    /// protocols that can't answer up-front a chance to make a definitive
+    /// decision using information available on the connected stream.
+    ///
+    /// The default implementation returns the value of [`Protocol::multiplex`],
+    /// so protocols that already know the answer before connecting don't need
+    /// to implement this separately.
+    fn multiplex_ready(&self, io: &IO) -> bool {
+        let _ = io;
+        self.multiplex()
     }
 }
 
@@ -189,5 +216,18 @@ mod tests {
     fn test_protocol_multiplex_default() {
         let protocol = TestProtocol;
         assert!(!Protocol::multiplex(&protocol));
+    }
+
+    #[test]
+    fn test_protocol_multiplex_ready_default() {
+        let protocol = TestProtocol;
+        let io = TestIO {
+            data: "test".to_string(),
+        };
+
+        assert_eq!(
+            Protocol::multiplex_ready(&protocol, &io),
+            Protocol::multiplex(&protocol)
+        );
     }
 }

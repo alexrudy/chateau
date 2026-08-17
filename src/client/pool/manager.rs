@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio::sync::oneshot::Sender;
 use tracing::trace;
 
@@ -37,6 +38,15 @@ pub struct ConnectionManagerConfig {
 
     /// Should in-progress connections continue after they get pre-empted by a new connection?
     pub continue_after_preemption: bool,
+
+    /// The maximum number of simultaneous connection attempts to this host.
+    ///
+    /// This bounds how many connectors may be actively connecting at once,
+    /// regardless of how many checkouts are queued up. It is similar in
+    /// spirit to [`max_idle_per_host`](Self::max_idle_per_host), but may
+    /// reasonably be set larger, since it limits work in progress rather
+    /// than connections held open at rest. `None` means there is no limit.
+    pub max_connecting_per_host: Option<usize>,
 }
 
 impl Default for ConnectionManagerConfig {
@@ -45,6 +55,7 @@ impl Default for ConnectionManagerConfig {
             idle_timeout: Some(Duration::from_secs(90)),
             max_idle_per_host: 32,
             continue_after_preemption: true,
+            max_connecting_per_host: None,
         }
     }
 }
@@ -108,6 +119,10 @@ where
     waiting: VecDeque<Sender<Pooled<C, R>>>,
     idle: IdleConnections<C, R>,
     config: Arc<ConnectionManagerConfig>,
+    /// Limits the number of simultaneous connection attempts to this host.
+    /// `None` when [`ConnectionManagerConfig::max_connecting_per_host`] is
+    /// unset, meaning there is no limit.
+    connecting_permits: Option<Arc<Semaphore>>,
 }
 
 impl<C, R> InnerConnectionManager<C, R>
@@ -117,18 +132,24 @@ where
 {
     /// Creates a new connection manager with the given configuration.
     fn new(config: impl Into<Arc<ConnectionManagerConfig>>) -> ArcMutex<Self> {
+        let config = config.into();
+        let connecting_permits = config
+            .max_connecting_per_host
+            .map(|limit| Arc::new(Semaphore::new(limit)));
+
         ArcMutex::new(Self {
             connecting: false,
             waiting: VecDeque::new(),
             idle: IdleConnections::default(),
-            config: config.into(),
+            config,
+            connecting_permits,
         })
     }
 
     /// Checks out a connection from the connection manager.
     fn checkout<T, P>(
         manager: &mut ArcMutexGuard<Self>,
-        connector: Connector<T, P, R>,
+        mut connector: Connector<T, P, R>,
     ) -> Checkout<T, P, R>
     where
         T: Transport<R> + Send,
@@ -136,18 +157,10 @@ where
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let multiplex = connector.multiplex();
-        let mut connector: Option<Connector<T, P, R>> = Some(connector);
         if let Some(connection) = manager.pop() {
             trace!("connection found in pool");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            return Checkout::new(
-                manager.downgrade(),
-                rx,
-                connector,
-                Some(connection),
-                request,
-                &manager.config,
-            );
+            let request = connector.take_request_unpinned();
+            return Checkout::new_connected(manager.downgrade(), rx, connection, request);
         }
 
         trace!("checkout interested in pooled connections");
@@ -155,29 +168,31 @@ where
 
         if manager.connecting {
             trace!("connection in progress elsewhere, will wait");
-            let request = connector.take().map(|mut c| c.take_request_unpinned());
-            Checkout::new(
+            Checkout::new_connecting(
                 manager.downgrade(),
                 rx,
                 connector,
-                None,
-                request,
-                &manager.config,
+                manager.connecting_permits.clone(),
             )
         } else {
+            // If we're about to block other connection attempts behind this
+            // one, this checkout becomes the "leader" responsible for that
+            // shared state: if it's abandoned before finishing, it must
+            // release any checkouts that queued up waiting for it.
+            let is_leader = multiplex;
             if multiplex {
                 // Only block new connection attempts if we can multiplex on this one.
                 trace!("checkout of multiplexed connection, other connections should wait");
                 manager.connecting = true;
             }
             trace!("connecting to host");
-            Checkout::new(
+            Checkout::new_idle(
                 manager.downgrade(),
                 rx,
                 connector,
-                None,
-                None,
                 &manager.config,
+                is_leader,
+                manager.connecting_permits.clone(),
             )
         }
     }
@@ -190,12 +205,50 @@ where
         self.connecting = false;
     }
 
+    /// Mark the in-progress connection attempt as having failed.
+    ///
+    /// The checkouts that were waiting for this connection attempt (because
+    /// it looked like it could be shared) can not be served by it any more.
+    /// Rather than releasing all of them at once -- which would turn a
+    /// single failure into a thundering herd of simultaneous connection
+    /// attempts -- this releases exactly one of them (dropping its `Sender`
+    /// wakes it, so it can attempt its own connection) and leaves the rest
+    /// queued up behind it, as if it were the new leader. If that one also
+    /// fails or is abandoned, its own call to this method releases the next
+    /// one in turn, and so on, until either someone succeeds (waking
+    /// everyone still queued via `push`) or the queue is exhausted.
+    pub(in crate::client) fn connection_failed(&mut self) {
+        while let Some(waiter) = self.waiting.pop_front() {
+            if waiter.is_closed() {
+                // Already abandoned, e.g. this is our own waiter (already
+                // closed above, before we got here) or a waiter belonging to
+                // a checkout that has already given up.
+                continue;
+            }
+
+            trace!("connection attempt failed, releasing next waiter in line");
+            // Leave `connecting` set: whoever we just released is now
+            // effectively the leader that everyone else still in the queue
+            // is waiting behind. Dropping `waiter` here closes its receiver.
+            return;
+        }
+
+        trace!("connection attempt failed, no other waiters remain");
+        self.connecting = false;
+    }
+
     /// Mark a connection as connected, but not done with the handshake.
     ///
     /// New connection attempts will wait for this connection to complete the
     /// handshake and re-use it if possible.
-    pub(in crate::client) fn connected_in_handshake(&mut self) {
-        self.connecting = true
+    pub(in crate::client) fn connected_in_handshake(&mut self, multiplex: bool) {
+        self.connecting = multiplex;
+        if !multiplex {
+            // We can't multiplex on this connection, so all waiters should give up
+            // and start their own connection attempts.
+            trace!(waiters=%self.waiting.len(), "dropping waiters");
+            self.waiting.clear();
+        }
     }
 
     /// Push a connection back onto this manager
@@ -261,7 +314,7 @@ mod tests {
 
     use super::*;
     use crate::client::conn::connector::Error;
-    use crate::client::conn::protocol::mock::{MockRequest, MockSender};
+    use crate::client::conn::protocol::mock::{MockProtocol, MockRequest, MockSender};
     use crate::client::conn::stream::mock::MockStream;
     use crate::client::conn::transport::mock::MockTransport;
 
@@ -273,6 +326,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = manager
@@ -311,6 +365,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = manager
@@ -348,6 +403,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -380,6 +436,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn = MockSender::single();
@@ -410,6 +467,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let conn_first = MockSender::single();
@@ -445,13 +503,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkout_drop_pool_err() {
+    async fn checkout_drop_pool_recover() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let start = manager.checkout(MockTransport::reusable().connector(MockRequest));
@@ -460,7 +519,7 @@ mod tests {
         drop(start);
         drop(manager);
 
-        assert!(checkout.now_or_never().unwrap().is_err());
+        assert!(checkout.now_or_never().unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -471,6 +530,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let checkout = manager.checkout(MockTransport::reusable().connector(MockRequest));
@@ -488,6 +548,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
 
         let checkout = manager.checkout(MockTransport::error().connector(MockRequest));
@@ -505,6 +566,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: false,
+            ..Default::default()
         });
         let other = manager.clone();
 
@@ -544,6 +606,7 @@ mod tests {
             idle_timeout: Some(Duration::from_secs(10)),
             max_idle_per_host: 5,
             continue_after_preemption: true,
+            ..Default::default()
         });
 
         let conn = manager
@@ -562,5 +625,444 @@ mod tests {
         assert_eq!(cid, conn.id());
 
         assert_eq!(manager.inner.lock().idle.len(), 1);
+    }
+
+    /// If the leading connection attempt fails before ever reaching the
+    /// handshake stage (so `connected_in_handshake` is never called), any
+    /// checkouts that queued up waiting for it must be released so they can
+    /// fall back to their own connection attempts, rather than hang forever
+    /// waiting on a connection that will never arrive.
+    #[tokio::test]
+    async fn checkout_connection_failure_releases_waiters() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+
+        // The leader uses a `Channel` transport, which reports that it can be
+        // reused, so the manager will eagerly mark itself as `connecting` and
+        // queue up the follower to wait for this connection instead of
+        // connecting on its own.
+        let leader = manager.checkout(MockTransport::channel(stream_rx).connector(MockRequest));
+        let follower = manager.checkout(MockTransport::reusable().connector(MockRequest));
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            2,
+            "leader and follower should both be queued waiting"
+        );
+
+        // Fail the leader's connection attempt before it ever reaches the
+        // handshake, so `connected_in_handshake` is never invoked.
+        drop(stream_tx);
+        let leader_result = leader.await;
+        assert!(leader_result.is_err(), "leader should fail to connect");
+
+        // The follower must be released rather than hang forever waiting on a
+        // connection that will never arrive, and should fall back on its own
+        // connection attempt instead.
+        let follower_result = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower should not hang waiting on the failed leader");
+        assert!(follower_result.unwrap().is_open());
+    }
+
+    /// A variant of [`checkout_connection_failure_releases_waiters`] which
+    /// verifies that the follower is actually woken up by the release, rather
+    /// than merely being observed as released the next time it happens to be
+    /// polled.
+    #[tokio::test]
+    async fn checkout_connection_failure_wakes_waiting_checkout() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+
+        let leader = manager.checkout(MockTransport::channel(stream_rx).connector(MockRequest));
+        let follower = manager.checkout(MockTransport::reusable().connector(MockRequest));
+
+        // Spawn the follower onto its own task, so it can only make progress
+        // if something wakes it up; we are not polling it ourselves.
+        let follower_task = tokio::spawn(follower);
+
+        // Give the spawned task a chance to run and register its waker while
+        // pending on the leader.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        drop(stream_tx);
+        let leader_result = leader.await;
+        assert!(leader_result.is_err(), "leader should fail to connect");
+
+        let follower_result = tokio::time::timeout(Duration::from_secs(1), follower_task)
+            .await
+            .expect("follower task should be woken and complete promptly")
+            .expect("follower task should not panic");
+
+        assert!(follower_result.unwrap().is_open());
+    }
+
+    /// When a connection attempt fails with multiple checkouts queued up
+    /// behind it, only one of them should be released to attempt its own
+    /// connection; the rest should remain queued behind that one, as if it
+    /// were the new leader. This avoids turning a single failure into a
+    /// thundering herd of simultaneous connection attempts. If that newly
+    /// released checkout also fails, it releases the next one in turn.
+    #[tokio::test]
+    async fn checkout_connection_failure_releases_one_waiter_at_a_time() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let (leader_tx, leader_rx) = tokio::sync::oneshot::channel();
+        let (follower_a_tx, follower_a_rx) = tokio::sync::oneshot::channel();
+
+        let mut leader = std::pin::pin!(
+            manager.checkout(MockTransport::channel(leader_rx).connector(MockRequest))
+        );
+        assert!(futures::poll!(&mut leader).is_pending());
+
+        let mut follower_a = std::pin::pin!(
+            manager.checkout(MockTransport::channel(follower_a_rx).connector(MockRequest))
+        );
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        let mut follower_b =
+            std::pin::pin!(manager.checkout(MockTransport::reusable().connector(MockRequest)));
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            3,
+            "leader and both followers should be queued waiting"
+        );
+
+        // Fail the leader. Only `follower_a` should be released to attempt
+        // its own connection; `follower_b` must remain queued.
+        drop(leader_tx);
+        let leader_result = leader.await;
+        assert!(leader_result.is_err(), "leader should fail to connect");
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            1,
+            "only follower_b should remain queued after the leader fails"
+        );
+
+        // `follower_b` must still be untouched: nobody has released it yet,
+        // so it should still just be waiting, not attempting its own
+        // connection (which would resolve immediately for a reusable mock
+        // transport).
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // `follower_a` has been promoted and should now be driving its own
+        // (still-blocked) connection attempt, rather than resolving.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        // Fail `follower_a`'s own connection attempt too. This should, in
+        // turn, release `follower_b`.
+        drop(follower_a_tx);
+        let follower_a_result = follower_a.await;
+        assert!(
+            follower_a_result.is_err(),
+            "follower_a should fail to connect"
+        );
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            0,
+            "follower_b should have been released after follower_a also failed"
+        );
+
+        let follower_b_result = tokio::time::timeout(Duration::from_secs(1), follower_b)
+            .await
+            .expect("follower_b should not hang once released");
+        assert!(follower_b_result.unwrap().is_open());
+    }
+
+    /// If the protocol eagerly reports that it can multiplex, but once
+    /// connected decides that this particular connection cannot actually be
+    /// shared, any checkouts that queued up waiting for it must fall back on
+    /// their own connection attempts.
+    #[tokio::test]
+    async fn checkout_multiplex_ready_false_releases_waiters() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let leader_connector = Connector::new(
+            MockTransport::reusable(),
+            MockProtocol::new(true).with_multiplex_ready(false),
+            MockRequest,
+        );
+
+        let leader = manager.checkout(leader_connector);
+        let follower = manager.checkout(MockTransport::reusable().connector(MockRequest));
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            2,
+            "leader and follower should both be queued waiting"
+        );
+
+        let leader_conn = leader.await.unwrap();
+        assert!(leader_conn.is_open());
+
+        // The follower should not have received the leader's connection,
+        // since it turned out not to be shareable; instead it should have
+        // connected on its own.
+        let follower_conn = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower should not hang waiting on a non-multiplexed leader")
+            .unwrap();
+        assert!(follower_conn.is_open());
+        assert_ne!(
+            follower_conn.id(),
+            leader_conn.id(),
+            "follower should have connected on its own, not shared the leader's connection"
+        );
+    }
+
+    /// If the checkout responsible for the manager's shared connecting
+    /// state (the leader) is abandoned before its connection attempt ever
+    /// finishes (e.g. because its caller lost a select race, hit a timeout,
+    /// or otherwise dropped it), any checkouts that queued up waiting for it
+    /// must be released, rather than hang forever waiting on a connection
+    /// attempt that will never resume.
+    #[tokio::test]
+    async fn checkout_leader_abandoned_releases_waiters() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let (_stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+
+        let leader = manager.checkout(MockTransport::channel(stream_rx).connector(MockRequest));
+        let follower = manager.checkout(MockTransport::reusable().connector(MockRequest));
+
+        assert_eq!(
+            manager.inner.lock().waiting.len(),
+            2,
+            "leader and follower should both be queued waiting"
+        );
+
+        // Abandon the leader entirely, without ever polling it to
+        // completion, as if its caller lost interest.
+        drop(leader);
+
+        let follower_result = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower should not hang waiting on an abandoned leader");
+        assert!(follower_result.unwrap().is_open());
+
+        assert!(
+            !manager.inner.lock().connecting,
+            "connecting flag should be reset"
+        );
+    }
+
+    /// Dropping a checkout that was only waiting on someone else's
+    /// connection (a follower, not the leader) must not disrupt the leader
+    /// or any other followers: the leader's connection attempt is still
+    /// healthy and may still be shared.
+    #[tokio::test]
+    async fn checkout_follower_drop_does_not_disrupt_leader_or_other_waiters() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            ..Default::default()
+        });
+
+        let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+
+        let mut leader = std::pin::pin!(
+            manager.checkout(MockTransport::channel(stream_rx).connector(MockRequest))
+        );
+        assert!(futures::poll!(&mut leader).is_pending());
+
+        let follower_a = manager.checkout(MockTransport::reusable().connector(MockRequest));
+        let follower_b = manager.checkout(MockTransport::reusable().connector(MockRequest));
+
+        // follower_a's own caller gives up on it, but the leader's
+        // connection attempt is still healthy and in progress, so
+        // follower_b should still be served by it.
+        drop(follower_a);
+
+        assert!(stream_tx.send(MockStream::reusable()).is_ok());
+
+        let leader_conn = leader.await.unwrap();
+        assert!(leader_conn.is_open());
+
+        let follower_b_conn = tokio::time::timeout(Duration::from_secs(1), follower_b)
+            .await
+            .expect("follower_b should not hang")
+            .unwrap();
+
+        assert_eq!(
+            follower_b_conn.id(),
+            leader_conn.id(),
+            "follower_b should still share the leader's connection despite follower_a's drop"
+        );
+    }
+
+    /// `max_connecting_per_host` should bound how many connectors are
+    /// actively attempting a connection at once, even when nothing else
+    /// would otherwise make them wait behind one another (e.g. because they
+    /// are not multiplexable, so each would normally become its own
+    /// independent leader).
+    #[tokio::test]
+    async fn checkout_limits_simultaneous_connection_attempts() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            max_connecting_per_host: Some(1),
+            ..Default::default()
+        });
+
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+
+        let connector_a = Connector::new(
+            MockTransport::channel(rx_a),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+        let connector_b = Connector::new(
+            MockTransport::single(),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+
+        let mut checkout_a = std::pin::pin!(manager.checkout(connector_a));
+        let mut checkout_b = std::pin::pin!(manager.checkout(connector_b));
+
+        // Neither connection is multiplexable, so absent the semaphore both
+        // would be independent "leaders" free to connect simultaneously.
+        // checkout_a acquires the only permit and then blocks on its own
+        // (channel-controlled) transport.
+        assert!(futures::poll!(&mut checkout_a).is_pending());
+
+        // checkout_b's transport (`MockTransport::single`) resolves
+        // immediately once polled -- as proven by other tests -- so the
+        // only reason it can still be `Pending` here is that it could not
+        // acquire a permit.
+        assert!(futures::poll!(&mut checkout_b).is_pending());
+
+        // Finish checkout_a, releasing its permit.
+        assert!(tx_a.send(MockStream::single()).is_ok());
+        let conn_a = checkout_a.await.unwrap();
+        assert!(conn_a.is_open());
+
+        // Now that a permit is free, checkout_b should be able to acquire
+        // it and complete right away.
+        let conn_b = tokio::time::timeout(Duration::from_secs(1), checkout_b)
+            .await
+            .expect("checkout_b should proceed once a permit frees up")
+            .unwrap();
+        assert!(conn_b.is_open());
+    }
+
+    /// When a non-shareable leader releases its entire queue of waiters at
+    /// once (see `checkout_multiplex_ready_false_releases_waiters`), the
+    /// connecting-attempt semaphore should still ensure that only one of
+    /// them actually drives a connection attempt at a time.
+    #[tokio::test]
+    async fn checkout_connecting_limit_throttles_full_queue_release() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let manager = ConnectionManager::<MockSender, MockRequest>::new(ConnectionManagerConfig {
+            idle_timeout: Some(Duration::from_secs(10)),
+            max_idle_per_host: 5,
+            continue_after_preemption: false,
+            max_connecting_per_host: Some(1),
+            ..Default::default()
+        });
+
+        let leader_connector = Connector::new(
+            MockTransport::reusable(),
+            MockProtocol::new(true).with_multiplex_ready(false),
+            MockRequest,
+        );
+        let leader = manager.checkout(leader_connector);
+
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel();
+
+        let follower_a_connector = Connector::new(
+            MockTransport::channel(rx_a),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+        let follower_b_connector = Connector::new(
+            MockTransport::channel(rx_b),
+            MockProtocol::new(false),
+            MockRequest,
+        );
+
+        let mut follower_a = std::pin::pin!(manager.checkout(follower_a_connector));
+        let mut follower_b = std::pin::pin!(manager.checkout(follower_b_connector));
+
+        // Both followers are queued behind the leader, which is still
+        // eagerly claiming it can be shared.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // The leader succeeds, but turns out not to be shareable, so
+        // `connected_in_handshake(false)` releases both followers at once.
+        let leader_conn = leader.await.unwrap();
+        assert!(leader_conn.is_open());
+
+        // follower_a acquires the only permit, then blocks on its own
+        // (channel-controlled) transport.
+        assert!(futures::poll!(&mut follower_a).is_pending());
+
+        // follower_b was released at the same time as follower_a, but must
+        // still be unable to proceed, since the one permit is already held.
+        assert!(futures::poll!(&mut follower_b).is_pending());
+
+        // Finish follower_a, releasing its permit.
+        assert!(tx_a.send(MockStream::single()).is_ok());
+        let conn_a = follower_a.await.unwrap();
+        assert!(conn_a.is_open());
+
+        // Now follower_b should be able to acquire the freed permit.
+        assert!(tx_b.send(MockStream::single()).is_ok());
+        let conn_b = tokio::time::timeout(Duration::from_secs(1), follower_b)
+            .await
+            .expect("follower_b should proceed once a permit frees up")
+            .unwrap();
+        assert!(conn_b.is_open());
     }
 }
