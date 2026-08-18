@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/alexrudy/chateau/compare/v0.3.4...v0.4.0) - 2026-08-18
+
+### Other
+
+- Merge pull request #57 from alexrudy/dependabot/cargo/futures-0.3.34
+- *(deps)* Bump thiserror from 2.0.19 to 2.0.20
+- Fix checkout MSRV
+- Add support for semaphore for simultaneous connection attempts.
+- Release queued checkouts one at a time on failure
+- Release queued checkouts when connections fail
+- Improve checkout when an alternative connection fails.
+- Allow for providing a multiplexing hint after connection (when the
+
 ## [0.3.4](https://github.com/alexrudy/chateau/compare/v0.3.3...v0.3.4) - 2026-08-15
 
 ### Added
