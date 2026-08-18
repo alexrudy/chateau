@@ -114,8 +114,12 @@ where
     }
 }
 
-impl<C, Req, Res> Multiplexed for FramedProtocol<C, Req, Res> {
+impl<C, Req, Res, IO> Multiplexed<IO> for FramedProtocol<C, Req, Res> {
     fn multiplex(&self) -> bool {
+        true
+    }
+
+    fn multiplex_ready(&self, _: &IO) -> bool {
         true
     }
 }
