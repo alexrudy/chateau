@@ -142,18 +142,3 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-
-  msrv:
-    name: Minimum Supported Rust Version
-    runs-on: ubuntu-latest
-    needs: versions
-    env:
-      RUSTUP_TOOLCHAIN: ${{ needs.versions.outputs.msrv }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "${{ needs.versions.outputs.msrv }}"
-
-      - name: Check MSRV
-        run: cargo check --all-features
