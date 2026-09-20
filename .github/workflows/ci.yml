@@ -53,6 +53,8 @@ jobs:
     continue-on-error: ${{ contains(fromJSON('["stable", "nightly", "beta"]'), matrix.toolchain) }}
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +74,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.rust }}-
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Run tests
         run: cargo test --features=${{ matrix.features }} --verbose
 
@@ -85,6 +90,7 @@ jobs:
         with:
           toolchain: ${{ needs.versions.outputs.stable }}
           components: rustfmt
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -101,12 +107,29 @@ jobs:
     continue-on-error: ${{ contains(fromJSON('["stable", "beta"]'), matrix.toolchian) }}
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.toolchian }}
           components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust }}-
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -116,11 +139,27 @@ jobs:
     needs: versions
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "${{ needs.versions.outputs.stable }}"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust }}-
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features
