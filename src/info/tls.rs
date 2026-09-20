@@ -146,7 +146,12 @@ mod channel {
             }
         }
 
-        pub(crate) async fn recv(&self) -> Option<TlsConnectionInfo> {
+        /// Wait for the TLS connection info to become available.
+        ///
+        /// Resolves to `None` if the underlying connection never sends TLS
+        /// info (e.g. a plaintext connection), or if the connection is
+        /// dropped before the handshake completes.
+        pub async fn recv(&self) -> Option<TlsConnectionInfo> {
             {
                 let state = self.state.read().await;
 
