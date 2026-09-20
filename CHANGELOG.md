@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/alexrudy/chateau/compare/v0.4.0...v0.4.1) - 2026-09-20
+
+### Other
+
+- Expose the TLS recv() function to get TLS connection info during a
+- Merge pull request #67 from alexrudy/chore/actions/checkout-v7
+- Bump actions/checkout to v7
+- Remove separate MSRV job and fold into test jobs
+- Add support for automatically bumping rust stable
+
 ## [0.4.0](https://github.com/alexrudy/chateau/compare/v0.3.4...v0.4.0) - 2026-08-18
 
 ### Other
