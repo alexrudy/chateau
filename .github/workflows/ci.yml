@@ -10,25 +10,56 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+
+  versions:
+    name: Determine toolchain versions
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.stable.outputs.version }}
+      msrv: ${{ steps.msrv.outputs.version }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Read pinned stable version
+        id: stable
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          echo "Pinned stable: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Read MSRV
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^rust-version/{print $2}' Cargo.toml)
+          echo "MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   test:
     name: Test Suite
+    needs: versions
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust:
+        toolchian:
+          - "${{ needs.versions.outputs.msrv }}"
+          - "${{ needs.versions.outputs.stable }}"
           - stable
           - beta
           - nightly
         features:
           - ""
           - tls-ring
+    continue-on-error: ${{ contains(fromJSON('["stable", "nightly", "beta"]'), matrix.toolchain) }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ matrix.toolchian }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -46,22 +77,35 @@ jobs:
 
   fmt:
     name: Rustfmt
+    needs: versions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ needs.versions.outputs.stable }}
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
+    needs: versions
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchian:
+          - "${{ needs.versions.outputs.stable }}"
+          - stable
+          - beta
+    continue-on-error: ${{ contains(fromJSON('["stable", "beta"]'), matrix.toolchian) }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ matrix.toolchian }}
           components: clippy
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -69,9 +113,14 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    needs: versions
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "${{ needs.versions.outputs.stable }}"
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features
@@ -82,9 +131,12 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+            toolchain: "${{ needs.versions.outputs.stable }}"
 
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -94,11 +146,14 @@ jobs:
   msrv:
     name: Minimum Supported Rust Version
     runs-on: ubuntu-latest
+    needs: versions
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.versions.outputs.msrv }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.87"
+          toolchain: "${{ needs.versions.outputs.msrv }}"
 
       - name: Check MSRV
         run: cargo check --all-features

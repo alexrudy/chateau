@@ -1,8 +1,10 @@
 #!/usr/bin/env just --justfile
 
 nightly := "nightly-2025-06-20"
-msrv := "1.87"
-rust := env("RUSTUP_TOOLCHAIN", "stable")
+msrv := `awk -F'"' '/^rust-version/{print $2}' Cargo.toml`
+pinned-stable := `awk -F'"' '/^channel/{print $2}' rust-toolchain.toml`
+rust := env("RUSTUP_TOOLCHAIN", pinned-stable)
+build := `cargo metadata --format-version=1 --no-deps | jq -r '.build_directory'`
 feature-set := "mock,tls-ring,server,client,duplex,codec"
 extended-features := "mock,tls,tls-ring,server,client,duplex,codec"
 
@@ -15,20 +17,20 @@ udeps: udeps-one udeps-client udeps-server
 
 # [private]
 udeps-one:
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --all-features
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --all-features
 
 # [private]
 udeps-client:
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring,mock,codec,duplex
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,codec
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,duplex
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring,mock,codec,duplex
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,tls,tls-ring
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,codec
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features client,duplex
 
 udeps-server:
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring,mock,codec,duplex
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,codec
-    CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,duplex
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring,mock,codec,duplex
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,tls,tls-ring
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,codec
+    CARGO_BUILD_DIR="{{build}}udeps" CARGO_TARGET_DIR="target/udeps" cargo +{{ nightly }} udeps --features server,duplex
 
 
 # Use machete to check for unused dependencies
@@ -71,7 +73,7 @@ check-hack-all-targets: (check-hack-targets "all-targets")
 
 # Check compilation combinations for a specific target
 check-hack-targets targets='tests':
-    cargo +{{ rust }} hack check --{{ targets }} {{ cargo-hack-args }} --no-private --feature-powerset --exclude-no-default-features --include-features {{ feature-set }}
+    CARGO_BUILD_DIR="{{build}}hack/" cargo +{{ rust }} hack check --{{ targets }} {{ cargo-hack-args }} --no-private --feature-powerset --exclude-no-default-features --include-features {{ feature-set }}
 
 # Build the library in release mode
 build:
@@ -98,8 +100,8 @@ read: docs
 
 # Check support for MSRV
 msrv:
-    cargo +{{ msrv }} check --target-dir target/msrv/ --all-targets --all-features
-    cargo +{{ msrv }} doc --target-dir target/msrv/ --all-features --no-deps
+    CARGO_BUILD_DIR="{{build}}msrv/" cargo +{{ msrv }} check --target-dir target/msrv/ --all-targets --all-features
+    CARGO_BUILD_DIR="{{build}}msrv/" cargo +{{ msrv }} doc --target-dir target/msrv/ --all-features --no-deps
 
 alias t := test
 
