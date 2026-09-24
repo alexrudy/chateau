@@ -6,14 +6,14 @@
 //! unencrypted connections.
 
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::{fmt, io};
 
 pub use crate::info::TlsConnectionInfo;
 #[cfg(feature = "server")]
 use crate::info::tls::TlsConnectionInfoReceiver;
-use crate::info::{ConnectionInfo, HasConnectionInfo, HasTlsConnectionInfo};
+use crate::info::{Address, ConnectionInfo, HasConnectionInfo, HasTlsConnectionInfo};
 use pin_project::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -132,7 +132,7 @@ where
 
 impl<Tls, NoTls, A> HasConnectionInfo for OptTlsStream<Tls, NoTls>
 where
-    A: fmt::Debug + fmt::Display + Send + 'static,
+    A: Address,
     Tls: HasConnectionInfo<Addr = A>,
     NoTls: HasConnectionInfo<Addr = A>,
 {
@@ -147,7 +147,7 @@ where
 
 impl<Tls, NoTls, A> HasTlsConnectionInfo for OptTlsStream<Tls, NoTls>
 where
-    A: fmt::Debug + fmt::Display + Send + 'static,
+    A: Address,
     Tls: HasConnectionInfo<Addr = A> + HasTlsConnectionInfo,
     NoTls: HasConnectionInfo<Addr = A>,
 {

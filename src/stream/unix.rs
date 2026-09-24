@@ -64,6 +64,8 @@ impl fmt::Display for UnixAddr {
     }
 }
 
+impl crate::info::Address for UnixAddr {}
+
 impl TryFrom<std::os::unix::net::SocketAddr> for UnixAddr {
     type Error = io::Error;
     fn try_from(addr: std::os::unix::net::SocketAddr) -> Result<Self, Self::Error> {
