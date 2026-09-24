@@ -67,6 +67,8 @@ impl fmt::Display for DuplexAddr {
     }
 }
 
+impl info::Address for DuplexAddr {}
+
 type ConnectionInfo = info::ConnectionInfo<DuplexAddr>;
 
 /// A duplex stream transports data entirely in memory within the tokio runtime.

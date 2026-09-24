@@ -105,6 +105,8 @@ impl fmt::Display for MockAddress {
     }
 }
 
+impl crate::info::Address for MockAddress {}
+
 impl HasConnectionInfo for MockStream {
     type Addr = MockAddress;
 
