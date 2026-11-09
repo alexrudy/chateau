@@ -232,6 +232,53 @@ pub(crate) mod fixtures {
         config
     }
 
+    /// Move all pending TLS records from one in-memory connection to another.
+    #[cfg(feature = "tls")]
+    fn tls_transfer<A, B>(
+        from: &mut rustls::ConnectionCommon<A>,
+        to: &mut rustls::ConnectionCommon<B>,
+    ) where
+        A: rustls::SideData,
+        B: rustls::SideData,
+    {
+        let mut buf = Vec::new();
+        while from.wants_write() {
+            from.write_tls(&mut buf).unwrap();
+        }
+
+        let mut remaining = buf.as_slice();
+        while !remaining.is_empty() {
+            to.read_tls(&mut remaining).unwrap();
+            to.process_new_packets().unwrap();
+        }
+    }
+
+    /// Create a client and server connection pair, and drive them through a
+    /// complete handshake entirely in memory.
+    ///
+    /// The client connects to `example.com`, and both sides offer `h2` and
+    /// `http/1.1` via ALPN.
+    #[cfg(feature = "tls")]
+    pub(crate) fn tls_handshake() -> (rustls::ClientConnection, rustls::ServerConnection) {
+        use std::sync::Arc;
+
+        tls_install_default();
+
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(tls_client_config()),
+            "example.com".try_into().unwrap(),
+        )
+        .unwrap();
+        let mut server = rustls::ServerConnection::new(Arc::new(tls_server_config())).unwrap();
+
+        while client.is_handshaking() || server.is_handshaking() {
+            tls_transfer(&mut client, &mut server);
+            tls_transfer(&mut server, &mut client);
+        }
+
+        (client, server)
+    }
+
     #[cfg(feature = "tls")]
     pub(crate) fn tls_install_default() {
         #[cfg(feature = "tls-ring")]

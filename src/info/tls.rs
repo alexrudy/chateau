@@ -2,13 +2,15 @@
 //!
 //! TLS information is a bit tricky, because it is realy only available after the handshake is complete.
 
+use rustls::{HandshakeKind, ProtocolVersion, SupportedCipherSuite, pki_types::CertificateDer};
+
 use super::HasConnectionInfo;
 
 #[cfg(all(feature = "server", feature = "tls"))]
 pub use self::channel::{TlsConnectionInfoReceiver, TlsConnectionInfoSender, channel};
 
 /// Information about a TLS connection.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TlsConnectionInfo {
     /// The server name used for this connection, as provided by the SNI
     /// extension.
@@ -19,6 +21,18 @@ pub struct TlsConnectionInfo {
 
     /// The application layer protocol negotiated for this connection.
     pub alpn: Option<String>,
+
+    /// The peer certificates used for authentication
+    pub peer_certificates: Option<Vec<CertificateDer<'static>>>,
+
+    /// Agreed handshake kind
+    pub handshake_kind: HandshakeKind,
+
+    /// Agreed TLS Version
+    pub tls_version: ProtocolVersion,
+
+    /// Agreed Cipher Suite
+    pub cipher_suite: SupportedCipherSuite,
 }
 
 #[cfg(feature = "tls")]
@@ -39,6 +53,18 @@ impl TlsConnectionInfo {
             server_name,
             validated_server_name: false,
             alpn,
+            peer_certificates: server_info
+                .peer_certificates()
+                .map(|certs| Vec::from(certs)),
+            handshake_kind: server_info
+                .handshake_kind()
+                .expect("tls info before handshake"),
+            tls_version: server_info
+                .protocol_version()
+                .expect("tls info before handshake"),
+            cipher_suite: server_info
+                .negotiated_cipher_suite()
+                .expect("tls info before handshake"),
         }
     }
 
@@ -53,20 +79,18 @@ impl TlsConnectionInfo {
             server_name: None,
             validated_server_name: false,
             alpn,
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn new_server(
-        server_name: Option<String>,
-        validated_server_name: bool,
-        alpn: Option<String>,
-    ) -> Self {
-        Self {
-            server_name,
-            validated_server_name,
-            alpn,
+            peer_certificates: client_info
+                .peer_certificates()
+                .map(|certs| Vec::from(certs)),
+            handshake_kind: client_info
+                .handshake_kind()
+                .expect("tls info before handshake"),
+            tls_version: client_info
+                .protocol_version()
+                .expect("tls info before handshake"),
+            cipher_suite: client_info
+                .negotiated_cipher_suite()
+                .expect("tls info before handshake"),
         }
     }
 
@@ -187,53 +211,32 @@ mod channel {
 #[cfg(all(test, feature = "tls"))]
 mod tests {
     use crate::fixtures;
-    use std::sync::Arc;
 
     #[test]
     fn tls_server_info() {
-        fixtures::tls_install_default();
+        let (client, server) = fixtures::tls_handshake();
 
-        #[derive(Debug, Clone)]
-        struct NoCertResolver;
-
-        impl rustls::server::ResolvesServerCert for NoCertResolver {
-            fn resolve(
-                &self,
-                _client_hello: rustls::server::ClientHello,
-            ) -> Option<Arc<rustls::sign::CertifiedKey>> {
-                None
-            }
-        }
-
-        let cfg = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(NoCertResolver));
-
-        let server_info = rustls::ServerConnection::new(Arc::new(cfg)).unwrap();
-        let info = super::TlsConnectionInfo::server(&server_info);
-        assert_eq!(info.server_name, None);
+        let info = super::TlsConnectionInfo::server(&server);
+        assert_eq!(info.server_name.as_deref(), Some("example.com"));
         assert!(!info.validated_server_name);
-        assert_eq!(info.alpn, None);
+        assert_eq!(info.alpn.as_deref(), Some("h2"));
+        assert_eq!(info.tls_version, client.protocol_version().unwrap());
+        assert_eq!(info.cipher_suite, client.negotiated_cipher_suite().unwrap());
+        // The fixture server does not request client certificates.
+        assert_eq!(info.peer_certificates, None);
     }
 
     #[test]
     fn tls_client_info() {
-        fixtures::tls_install_default();
+        let (client, server) = fixtures::tls_handshake();
 
-        let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        };
-
-        let cfg = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        let client_info =
-            rustls::ClientConnection::new(Arc::new(cfg), "example.com".try_into().unwrap())
-                .unwrap();
-        let info = super::TlsConnectionInfo::client(&client_info);
+        let info = super::TlsConnectionInfo::client(&client);
         assert_eq!(info.server_name, None);
         assert!(!info.validated_server_name);
-        assert_eq!(info.alpn, None);
+        assert_eq!(info.alpn.as_deref(), Some("h2"));
+        assert_eq!(info.tls_version, server.protocol_version().unwrap());
+        assert_eq!(info.cipher_suite, server.negotiated_cipher_suite().unwrap());
+        // The client sees the server's certificate chain.
+        assert_eq!(info.peer_certificates.map(|c| c.len()), Some(1));
     }
 }
