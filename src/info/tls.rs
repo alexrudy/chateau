@@ -2,6 +2,7 @@
 //!
 //! TLS information is a bit tricky, because it is realy only available after the handshake is complete.
 
+#[cfg(feature = "tls")]
 use rustls::{HandshakeKind, ProtocolVersion, SupportedCipherSuite, pki_types::CertificateDer};
 
 use super::HasConnectionInfo;
@@ -23,15 +24,19 @@ pub struct TlsConnectionInfo {
     pub alpn: Option<String>,
 
     /// The peer certificates used for authentication
+    #[cfg(feature = "tls")]
     pub peer_certificates: Option<Vec<CertificateDer<'static>>>,
 
     /// Agreed handshake kind
+    #[cfg(feature = "tls")]
     pub handshake_kind: HandshakeKind,
 
     /// Agreed TLS Version
+    #[cfg(feature = "tls")]
     pub tls_version: ProtocolVersion,
 
     /// Agreed Cipher Suite
+    #[cfg(feature = "tls")]
     pub cipher_suite: SupportedCipherSuite,
 }
 
@@ -55,7 +60,7 @@ impl TlsConnectionInfo {
             alpn,
             peer_certificates: server_info
                 .peer_certificates()
-                .map(|certs| Vec::from(certs)),
+                .map(Vec::from),
             handshake_kind: server_info
                 .handshake_kind()
                 .expect("tls info before handshake"),
@@ -81,7 +86,7 @@ impl TlsConnectionInfo {
             alpn,
             peer_certificates: client_info
                 .peer_certificates()
-                .map(|certs| Vec::from(certs)),
+                .map(Vec::from),
             handshake_kind: client_info
                 .handshake_kind()
                 .expect("tls info before handshake"),
