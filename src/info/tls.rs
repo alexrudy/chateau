@@ -58,9 +58,7 @@ impl TlsConnectionInfo {
             server_name,
             validated_server_name: false,
             alpn,
-            peer_certificates: server_info
-                .peer_certificates()
-                .map(Vec::from),
+            peer_certificates: server_info.peer_certificates().map(Vec::from),
             handshake_kind: server_info
                 .handshake_kind()
                 .expect("tls info before handshake"),
@@ -84,9 +82,7 @@ impl TlsConnectionInfo {
             server_name: None,
             validated_server_name: false,
             alpn,
-            peer_certificates: client_info
-                .peer_certificates()
-                .map(Vec::from),
+            peer_certificates: client_info.peer_certificates().map(Vec::from),
             handshake_kind: client_info
                 .handshake_kind()
                 .expect("tls info before handshake"),
