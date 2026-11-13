@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/alexrudy/chateau/compare/v0.4.2...v0.5.0) - 2026-11-13
+
+### Other
+
+- cargo fmt
+- Fix up TLS Info feature respect
+- Adds additional info to TlsConnections
+- *(deps)* Bump rustls-native-certs from 0.8.4 to 0.8.5
+- Upgrade rustls-webpki
+- Update webpki-roots and tokio
+- *(deps)* Bump rustls from 0.23.45 to 0.23.46
+- Merge pull request #75 from alexrudy/dependabot/cargo/tokio-1.53.2
+- *(deps)* Bump tokio-util from 0.7.19 to 0.7.20
+- *(deps)* Bump tokio from 1.53.1 to 1.53.2
+- Bump pinned stable Rust to 1.99
+
 ## [0.4.2](https://github.com/alexrudy/chateau/compare/v0.4.1...v0.4.2) - 2026-09-24
 
 ### Other
